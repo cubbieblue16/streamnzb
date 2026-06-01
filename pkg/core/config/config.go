@@ -17,6 +17,7 @@ import (
 	"streamnzb/pkg/core/env"
 	"streamnzb/pkg/core/logger"
 	"streamnzb/pkg/core/paths"
+	"streamnzb/pkg/datebased"
 )
 
 const (
@@ -32,6 +33,10 @@ const (
 	SeriesSearchScopeSeasonEpisode         = "season_episode"
 	SeriesSearchScopeSeason                = "season"
 	SeriesSearchScopeNone                  = "none"
+	// SeriesSearchScopeDate searches date-organised shows (e.g. WWE Raw) by the
+	// episode air date instead of SxxExx. Forced automatically for registered
+	// date-based shows; see pkg/datebased.
+	SeriesSearchScopeDate = "date"
 	legacySeriesSearchScopeEpisodeParam    = "episode_param"
 	legacySeriesSearchScopeEpisodeQuery    = "episode_query"
 	legacySeriesSearchScopeSeasonParam     = "season_param"
@@ -302,7 +307,8 @@ func NormalizeSeriesSearchScope(scope string) string {
 	switch strings.ToLower(strings.TrimSpace(scope)) {
 	case SeriesSearchScopeSeasonEpisode,
 		SeriesSearchScopeSeason,
-		SeriesSearchScopeNone:
+		SeriesSearchScopeNone,
+		SeriesSearchScopeDate:
 		return strings.ToLower(strings.TrimSpace(scope))
 	case legacySeriesSearchScopeEpisodeParam,
 		legacySeriesSearchScopeEpisodeQuery:
@@ -353,7 +359,7 @@ func SeriesSearchScopeSearchTarget(scope, searchMode, season, episode string) (s
 
 func SeriesSearchScopeRequiresValidation(scope string) bool {
 	switch NormalizeSeriesSearchScope(scope) {
-	case SeriesSearchScopeSeason, SeriesSearchScopeNone:
+	case SeriesSearchScopeSeason, SeriesSearchScopeNone, SeriesSearchScopeDate:
 		return true
 	default:
 		return false
@@ -398,6 +404,10 @@ type Config struct {
 
 	MovieSearchQueries  []SearchQueryConfig `json:"movie_search_queries,omitempty"`
 	SeriesSearchQueries []SearchQueryConfig `json:"series_search_queries,omitempty"`
+
+	// DateBasedShows registers extra date-organised shows (searched by air date
+	// instead of SxxExx) on top of the built-in WWE defaults. See pkg/datebased.
+	DateBasedShows []datebased.Show `json:"date_based_shows,omitempty"`
 
 	// MemoryLimitMB sets a soft limit on total Go heap (runtime/debug.SetMemoryLimit). 0 = no limit.
 	// When set, segment cache is automatically 80% of this limit.

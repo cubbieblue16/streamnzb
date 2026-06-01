@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"streamnzb/pkg/core/logger"
@@ -12,6 +13,57 @@ import (
 )
 
 var seriesValidationSuffixRE = regexp.MustCompile(`(?i)\s+s[0-9]{1,2}(?:e[0-9]{1,3})?$`)
+
+// releaseDateRE matches a YYYY MM DD date in a release title with any common
+// separator (".", "-", "_", space), e.g. "WWE.Monday.Night.RAW.2024.01.08...".
+var releaseDateRE = regexp.MustCompile(`(?:^|[^0-9])((?:19|20)\d{2})[.\-_ ](\d{2})[.\-_ ](\d{2})(?:[^0-9]|$)`)
+
+// DateMatch configures air-date based result matching for date-organised shows
+// (e.g. WWE Raw). When supplied to validation, a release is accepted when its
+// parsed date is within ToleranceDays of AirDate, replacing the SxxExx gate.
+type DateMatch struct {
+	AirDate       string // "YYYY-MM-DD"
+	ToleranceDays int
+}
+
+func extractReleaseDate(title string) (time.Time, bool) {
+	m := releaseDateRE.FindStringSubmatch(title)
+	if len(m) != 4 {
+		return time.Time{}, false
+	}
+	year, _ := strconv.Atoi(m[1])
+	month, _ := strconv.Atoi(m[2])
+	day, _ := strconv.Atoi(m[3])
+	if month < 1 || month > 12 || day < 1 || day > 31 {
+		return time.Time{}, false
+	}
+	return time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC), true
+}
+
+// releaseDateMatches reports whether the release title carries a date within the
+// configured tolerance (default 1 day) of the expected air date.
+func releaseDateMatches(title string, dateMatch *DateMatch) bool {
+	if dateMatch == nil {
+		return false
+	}
+	air, err := time.Parse("2006-01-02", strings.TrimSpace(dateMatch.AirDate))
+	if err != nil {
+		return false
+	}
+	relDate, ok := extractReleaseDate(title)
+	if !ok {
+		return false
+	}
+	tolerance := dateMatch.ToleranceDays
+	if tolerance <= 0 {
+		tolerance = 1
+	}
+	diff := relDate.Sub(air)
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff <= time.Duration(tolerance)*24*time.Hour
+}
 
 func movieYearMatches(expectYear, gotYear int) bool {
 	if expectYear <= 0 || gotYear <= 0 {
@@ -289,6 +341,13 @@ func ValidateSearchResultsWithStats(releases []*release.Release, contentType, va
 }
 
 func ValidateSearchResultsWithStatsForQueries(releases []*release.Release, contentType string, validationQueries []string, season, episode string, enableTitleValidation, enableYearValidation bool) ([]*release.Release, ValidationStats) {
+	return ValidateSearchResultsWithDateMatch(releases, contentType, validationQueries, season, episode, enableTitleValidation, enableYearValidation, nil)
+}
+
+// ValidateSearchResultsWithDateMatch is ValidateSearchResultsWithStatsForQueries
+// with optional air-date matching for date-organised shows. When dateMatch is
+// nil, behaviour is identical to the standard SxxExx validation.
+func ValidateSearchResultsWithDateMatch(releases []*release.Release, contentType string, validationQueries []string, season, episode string, enableTitleValidation, enableYearValidation bool, dateMatch *DateMatch) ([]*release.Release, ValidationStats) {
 	stats := ValidationStats{}
 	if contentType != "movie" && contentType != "series" {
 		stats.RawResults = len(releases)
@@ -343,7 +402,17 @@ func ValidateSearchResultsWithStatsForQueries(releases []*release.Release, conte
 				)
 				continue
 			}
-			if expectEpisode > 0 {
+			if dateMatch != nil {
+				if !releaseDateMatches(rel.Title, dateMatch) {
+					stats.DroppedEpisodeRequest++
+					logger.Trace("ValidateSearchResults dropped: air_date",
+						"expect_air_date", dateMatch.AirDate,
+						"tolerance_days", dateMatch.ToleranceDays,
+						"release", rel.Title,
+					)
+					continue
+				}
+			} else if expectEpisode > 0 {
 				if !parsed.MatchesEpisodeRequest(expectSeason, expectEpisode) {
 					stats.DroppedEpisodeRequest++
 					logger.Trace("ValidateSearchResults dropped: episode_request",
@@ -379,6 +448,8 @@ func ValidateSearchResultsWithStatsForQueries(releases []*release.Release, conte
 
 		if contentType == "series" {
 			switch {
+			case dateMatch != nil:
+				stats.AcceptedExactEpisode++
 			case expectEpisode > 0:
 				switch parsed.EpisodeMatchRank(expectSeason, expectEpisode) {
 				case 4:

@@ -165,7 +165,11 @@ func RunIndexerSearches(idx indexer.Indexer, req indexer.SearchRequest, contentT
 		}
 	}
 
-	releases, _ = ValidateSearchResultsWithStatsForQueries(releases, contentType, validationQueries, req.Season, req.Episode, true, req.EnableYearValidation)
+	var dateMatch *DateMatch
+	if req.DateBased && strings.TrimSpace(req.EpisodeAirDate) != "" {
+		dateMatch = &DateMatch{AirDate: req.EpisodeAirDate, ToleranceDays: req.DateToleranceDays}
+	}
+	releases, _ = ValidateSearchResultsWithDateMatch(releases, contentType, validationQueries, req.Season, req.Episode, true, req.EnableYearValidation, dateMatch)
 	for _, profile := range validationProfilesForRequest(req) {
 		_, profileStats := ValidateSearchResultsWithStats(rawReleases, contentType, profile.Query, req.Season, req.Episode, true, req.EnableYearValidation)
 		validationAttrs := []any{

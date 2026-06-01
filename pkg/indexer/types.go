@@ -41,7 +41,12 @@ type SearchRequest struct {
 	Season                  string
 	Episode                 string
 	SeriesSearchScope       string
-	SearchMode              string
+	// DateBased marks a date-organised show (e.g. WWE Raw): results are matched
+	// by air date instead of SxxExx. EpisodeAirDate is "YYYY-MM-DD".
+	DateBased         bool
+	EpisodeAirDate    string
+	DateToleranceDays int
+	SearchMode        string
 	DisableResultFiltering  bool
 	EnableYearValidation    bool
 	IndexerMode             string

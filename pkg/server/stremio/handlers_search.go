@@ -10,6 +10,7 @@ import (
 	"streamnzb/pkg/auth"
 	"streamnzb/pkg/core/config"
 	"streamnzb/pkg/core/logger"
+	"streamnzb/pkg/datebased"
 	"streamnzb/pkg/indexer"
 	"streamnzb/pkg/release"
 	"streamnzb/pkg/search"
@@ -39,6 +40,13 @@ type resolvedSearchMetadata struct {
 	TVDetails              *tmdb.TVDetails
 	TVTranslations         *tmdb.TVTranslationsResponse
 	TVAlternativeTitles    *tmdb.TVAlternativeTitlesResponse
+
+	// DateBased and the fields below are populated for date-organised shows
+	// (e.g. WWE Raw): the show is searched/validated by air date, not SxxExx.
+	DateBased            bool
+	SeriesTitleOverrides []string // scene titles, most-specific first
+	EpisodeAirDate       string   // "YYYY-MM-DD" resolved from TMDB
+	DateToleranceDays    int
 }
 
 func metadataDisplayTitle(metadata *resolvedSearchMetadata, contentType string) string {
@@ -464,6 +472,10 @@ func buildSeriesPrimaryQueryFromMetadata(metadata *resolvedSearchMetadata, langu
 		title = appendSeasonEpisodeQuery(title, season, episode)
 	case config.SeriesSearchScopeSeason:
 		title = appendSeasonQuery(title, season)
+	case config.SeriesSearchScopeDate:
+		if queries := buildSeriesDateQueriesFromMetadata(metadata); len(queries) > 0 {
+			return queries[0]
+		}
 	}
 	return title
 }
@@ -471,6 +483,12 @@ func buildSeriesPrimaryQueryFromMetadata(metadata *resolvedSearchMetadata, langu
 func buildSeriesSearchTitleFromMetadata(metadata *resolvedSearchMetadata, language string) string {
 	if metadata == nil || metadata.TVDetails == nil {
 		return ""
+	}
+	// Date-organised shows override the (wrong) TMDB title with the scene title.
+	if metadata.DateBased {
+		if override := firstSceneTitle(metadata); override != "" {
+			return override
+		}
 	}
 	title := strings.TrimSpace(metadata.TVDetails.Name)
 	if useOriginalTitleLanguage(language) {
@@ -525,6 +543,91 @@ func buildSeriesValidationQueriesFromMetadata(metadata *resolvedSearchMetadata, 
 
 func buildSeriesOriginalQueryFromMetadata(metadata *resolvedSearchMetadata) string {
 	return strings.TrimSpace(preferredSeriesOriginalTitle(metadata))
+}
+
+// sceneTitlesForMetadata returns the configured scene titles for a date-based
+// show, falling back to the TMDB name when none are set.
+func sceneTitlesForMetadata(metadata *resolvedSearchMetadata) []string {
+	if metadata == nil {
+		return nil
+	}
+	titles := make([]string, 0, len(metadata.SeriesTitleOverrides)+1)
+	for _, title := range metadata.SeriesTitleOverrides {
+		if trimmed := strings.TrimSpace(title); trimmed != "" {
+			titles = append(titles, trimmed)
+		}
+	}
+	if len(titles) == 0 && metadata.TVDetails != nil {
+		if name := strings.TrimSpace(metadata.TVDetails.Name); name != "" {
+			titles = append(titles, name)
+		}
+	}
+	return titles
+}
+
+func firstSceneTitle(metadata *resolvedSearchMetadata) string {
+	titles := sceneTitlesForMetadata(metadata)
+	if len(titles) == 0 {
+		return ""
+	}
+	return titles[0]
+}
+
+// splitISODate splits a "YYYY-MM-DD" air date into its parts. ok is false when
+// the input is not a well-formed ISO date.
+func splitISODate(airDate string) (year, month, day string, ok bool) {
+	airDate = strings.TrimSpace(airDate)
+	parts := strings.Split(airDate, "-")
+	if len(parts) != 3 || len(parts[0]) != 4 || len(parts[1]) != 2 || len(parts[2]) != 2 {
+		return "", "", "", false
+	}
+	for _, part := range parts {
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return "", "", "", false
+			}
+		}
+	}
+	return parts[0], parts[1], parts[2], true
+}
+
+// buildSeriesDateQueriesFromMetadata builds "<scene title> YYYY MM DD" search
+// queries (spaced and dotted variants) from the resolved episode air date.
+func buildSeriesDateQueriesFromMetadata(metadata *resolvedSearchMetadata) []string {
+	if metadata == nil {
+		return nil
+	}
+	year, month, day, ok := splitISODate(metadata.EpisodeAirDate)
+	if !ok {
+		return nil
+	}
+	titles := sceneTitlesForMetadata(metadata)
+	queries := make([]string, 0, len(titles)*2)
+	for _, title := range titles {
+		base := strings.TrimSpace(release.NormalizeTitleForSearchQuery(title))
+		if base == "" {
+			continue
+		}
+		queries = appendUniqueSearchQuery(queries, fmt.Sprintf("%s %s %s %s", base, year, month, day))
+		queries = appendUniqueSearchQuery(queries, fmt.Sprintf("%s %s.%s.%s", base, year, month, day))
+	}
+	return queries
+}
+
+// buildSeriesDateValidationQueriesFromMetadata returns one validation query per
+// scene title (no date/year suffix) so a release matching any accepted scene
+// naming passes title validation.
+func buildSeriesDateValidationQueriesFromMetadata(metadata *resolvedSearchMetadata) []string {
+	titles := sceneTitlesForMetadata(metadata)
+	queries := make([]string, 0, len(titles))
+	for _, title := range titles {
+		normalized := strings.TrimSpace(release.NormalizeTitleForSearchQuery(title))
+		if normalized == "" {
+			continue
+		}
+		queries = appendUniqueSearchQuery(queries, normalized)
+	}
+	return queries
 }
 
 func uniqueTitleLogValues(values []string) []string {
@@ -646,6 +749,16 @@ func searchRequestNormalisationLogEntries(metadata *resolvedSearchMetadata, cont
 }
 
 func validationQueryProfilesFromMetadata(metadata *resolvedSearchMetadata, contentType string, languages []string, includeYear bool) []indexer.ValidationQueryProfile {
+	// Date-organised shows validate against scene titles (any match accepted),
+	// with air-date matching handled separately during result validation.
+	if contentType == "series" && metadata != nil && metadata.DateBased {
+		dateQueries := buildSeriesDateValidationQueriesFromMetadata(metadata)
+		profiles := make([]indexer.ValidationQueryProfile, 0, len(dateQueries))
+		for _, query := range dateQueries {
+			profiles = append(profiles, indexer.ValidationQueryProfile{Query: query})
+		}
+		return profiles
+	}
 	grouped := make(map[string]*indexer.ValidationQueryProfile, len(languages))
 	order := make([]string, 0, len(languages))
 	for _, language := range languages {
@@ -725,6 +838,9 @@ func buildMovieQueriesFromMetadata(metadata *resolvedSearchMetadata, language st
 func buildSeriesQueriesFromMetadata(metadata *resolvedSearchMetadata, language string, includeYear bool, season, episode, scope string) []string {
 	if metadata == nil || metadata.TVDetails == nil {
 		return nil
+	}
+	if config.NormalizeSeriesSearchScope(scope) == config.SeriesSearchScopeDate {
+		return buildSeriesDateQueriesFromMetadata(metadata)
 	}
 	primary := strings.TrimSpace(release.NormalizeTitleForSearchQuery(buildSeriesSearchTitleFromMetadata(metadata, language)))
 	if primary == "" {
@@ -1380,6 +1496,39 @@ func (s *Server) buildSearchParamsBase(contentType, id string, searchQuery *conf
 	seasonNum, _ := strconv.Atoi(req.Season)
 	episodeNum, _ := strconv.Atoi(req.Episode)
 	contentIDs := &session.AvailReportMeta{ImdbID: req.IMDbID, TmdbID: req.TMDBID, TvdbID: req.TVDBID, Season: seasonNum, Episode: episodeNum}
+
+	if contentType == "series" && params.Metadata != nil {
+		tmdbNum, _ := strconv.Atoi(req.TMDBID)
+		var tvName, tvOriginal string
+		if params.Metadata.TVDetails != nil {
+			tvName = params.Metadata.TVDetails.Name
+			tvOriginal = params.Metadata.TVDetails.OriginalName
+		}
+		if show, ok := datebased.Lookup(s.config.DateBasedShows, req.IMDbID, tmdbNum, tvName, tvOriginal); ok {
+			params.Metadata.DateBased = true
+			params.Metadata.SeriesTitleOverrides = show.SceneTitles
+			params.Metadata.DateToleranceDays = show.Tolerance()
+			if s.tmdbClient != nil && tmdbNum > 0 && episodeNum > 0 {
+				if seasonDetails, err := s.tmdbClient.GetTVSeasonDetails(tmdbNum, seasonNum); err == nil {
+					for _, ep := range seasonDetails.Episodes {
+						if ep.EpisodeNumber == episodeNum {
+							params.Metadata.EpisodeAirDate = strings.TrimSpace(ep.AirDate)
+							break
+						}
+					}
+				} else {
+					logMetadataResolutionState(contentType, id, "tmdb_season_air_date", "tmdb_id", req.TMDBID, "season", seasonNum, "status", "failed", "err", err)
+				}
+			}
+			logMetadataResolutionState(contentType, id, "date_based_show",
+				"tmdb_id", req.TMDBID,
+				"imdb_id", req.IMDbID,
+				"show", show.Name,
+				"air_date", params.Metadata.EpisodeAirDate,
+				"scene_titles", show.SceneTitles,
+			)
+		}
+	}
 	if contentType == "movie" && req.TMDBID != "" && s.tmdbClient != nil {
 		if tmdbIDNum, err := strconv.Atoi(req.TMDBID); err == nil {
 			if details, err := s.tmdbClient.GetMovieDetails(tmdbIDNum); err == nil {
@@ -1457,6 +1606,16 @@ func (s *Server) buildSearchParamsFromBase(base *SearchParams, searchQuery *conf
 			includeYear = false
 		}
 		scope = config.NormalizeSeriesSearchScope(searchQuery.SeriesSearchScope)
+	}
+	if contentType == "series" && params.Metadata != nil && params.Metadata.DateBased {
+		// Force date scope and text search: air-date queries cannot be expressed
+		// through newznab id-search season/episode params.
+		scope = config.SeriesSearchScopeDate
+		searchMode = "text"
+		includeYear = false
+		req.DateBased = true
+		req.EpisodeAirDate = params.Metadata.EpisodeAirDate
+		req.DateToleranceDays = params.Metadata.DateToleranceDays
 	}
 	req.SeriesSearchScope = scope
 	req.EnableYearValidation = includeYear
