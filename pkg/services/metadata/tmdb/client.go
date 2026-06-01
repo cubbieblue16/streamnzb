@@ -131,6 +131,20 @@ type TVTranslationData struct {
 }
 
 func (c *Client) doRequest(endpoint string, params url.Values) (*http.Response, error) {
+	if params == nil {
+		params = url.Values{}
+	}
+
+	// TMDB accepts two credential formats. A v4 "API Read Access Token" is a JWT
+	// (always contains dots) sent as a Bearer header; a v3 API key is a 32-char
+	// hex string with no dots, passed as the api_key query parameter. Detect
+	// which one we hold so either works.
+	key := strings.TrimSpace(c.apiKey)
+	useV3 := key != "" && !strings.Contains(key, ".")
+	if useV3 {
+		params.Set("api_key", key)
+	}
+
 	reqURL := fmt.Sprintf("%s?%s", endpoint, params.Encode())
 
 	req, err := http.NewRequest("GET", reqURL, nil)
@@ -138,7 +152,9 @@ func (c *Client) doRequest(endpoint string, params url.Values) (*http.Response, 
 		return nil, err
 	}
 
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	if !useV3 {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
 	req.Header.Set("accept", "application/json")
 
 	return c.client.Do(req)
