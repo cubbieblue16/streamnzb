@@ -45,11 +45,15 @@ func (s Show) Tolerance() int {
 }
 
 // builtin is the default registry of date-organised shows.
+//
+// IDs are pinned so detection is language-proof: TMDB lists WWE Raw under the
+// bare name "Raw" (id 4656), which would never satisfy the "wwe"+"raw" keyword
+// match. Keywords remain as a fallback for re-numbered/duplicate TMDB entries.
 var builtin = []Show{
-	{Name: "WWE Raw", Keywords: []string{"wwe", "raw"}, SceneTitles: []string{"WWE Monday Night RAW", "WWE RAW"}},
-	{Name: "WWE SmackDown", Keywords: []string{"wwe", "smackdown"}, SceneTitles: []string{"WWE Friday Night SmackDown", "WWE SmackDown"}},
-	{Name: "WWE NXT", Keywords: []string{"wwe", "nxt"}, SceneTitles: []string{"WWE NXT"}},
-	{Name: "WWE Main Event", Keywords: []string{"wwe", "main event"}, SceneTitles: []string{"WWE Main Event"}},
+	{Name: "WWE Raw", TMDBIDs: []int{4656}, IMDbIDs: []string{"tt0185103"}, Keywords: []string{"wwe", "raw"}, SceneTitles: []string{"WWE Monday Night RAW", "WWE RAW"}},
+	{Name: "WWE SmackDown", TMDBIDs: []int{1549}, IMDbIDs: []string{"tt0227972"}, Keywords: []string{"wwe", "smackdown"}, SceneTitles: []string{"WWE Friday Night SmackDown", "WWE SmackDown"}},
+	{Name: "WWE NXT", TMDBIDs: []int{31991}, IMDbIDs: []string{"tt1601141"}, Keywords: []string{"wwe", "nxt"}, SceneTitles: []string{"WWE NXT"}},
+	{Name: "WWE Main Event", TMDBIDs: []int{46707}, IMDbIDs: []string{"tt2659152"}, Keywords: []string{"wwe", "main event"}, SceneTitles: []string{"WWE Main Event"}},
 }
 
 // Builtin returns a copy of the default registry.

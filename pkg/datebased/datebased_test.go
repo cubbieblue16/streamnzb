@@ -33,6 +33,21 @@ func TestLookupMatchesWWEByName(t *testing.T) {
 	}
 }
 
+func TestLookupMatchesRawByPinnedID(t *testing.T) {
+	// Real TMDB data: WWE Raw is id 4656 with the bare name "Raw" (imdb tt0185103).
+	// Keyword match ("wwe"+"raw") fails on "Raw" alone; the pinned id must catch it.
+	if show, ok := Lookup(nil, "", 4656, "Raw", "Raw"); !ok || show.Name != "WWE Raw" {
+		t.Fatalf("expected TMDB id 4656 to match WWE Raw, got ok=%v show=%+v", ok, show)
+	}
+	if show, ok := Lookup(nil, "tt0185103", 0, "Raw", "Raw"); !ok || show.Name != "WWE Raw" {
+		t.Fatalf("expected imdb tt0185103 to match WWE Raw, got ok=%v show=%+v", ok, show)
+	}
+	// Name-only "Raw" with no id must NOT match (avoids false positives like the film "Raw").
+	if _, ok := Lookup(nil, "", 0, "Raw", "Raw"); ok {
+		t.Fatalf("bare name 'Raw' with no id should not match")
+	}
+}
+
 func TestLookupRejectsNonDateBased(t *testing.T) {
 	if _, ok := Lookup(nil, "tt0903747", 1396, "Breaking Bad", ""); ok {
 		t.Fatalf("Breaking Bad should not match a date-based show")
