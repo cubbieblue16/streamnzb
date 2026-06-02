@@ -35,6 +35,11 @@ type Movie struct {
 	// Keywords match by TMDB title: every keyword (lower-cased) must be a
 	// substring of the TMDB title or original title. Used when ids are unknown.
 	Keywords []string `json:"keywords,omitempty"`
+	// ProductionCompanyIDs match by TMDB production_companies: any one of the
+	// listed ids appearing on the movie counts as a match. Used as a structural
+	// fallback for franchises where TMDB titles drift in/out of carrying the
+	// brand prefix (e.g. WWE PLEs that TMDB sometimes titles without "WWE").
+	ProductionCompanyIDs []int `json:"production_company_ids,omitempty"`
 	// SceneTitles, when set, override the derived scene title list. Each entry
 	// is used as-is. When empty, the TMDB title is used as the base (optionally
 	// prepended with "WWE " per RequireWWEPrefix).
@@ -82,10 +87,16 @@ var builtin = []Movie{
 	{Name: "WWE PLE: Day 1", Keywords: []string{"wwe day 1"}, RequireWWEPrefix: true},
 	{Name: "WWE PLE: Evolution", Keywords: []string{"wwe evolution"}, RequireWWEPrefix: true},
 	{Name: "WWE PLE: Worlds Collide", Keywords: []string{"worlds collide"}, RequireWWEPrefix: true},
-	// Catch-all: any movie whose TMDB title starts with the WWE token. Broad
-	// fallback for PLEs whose specific name isn't on the list above (the
-	// release will still need "WWE" + the event name in the scene title).
+	// Catch-all by TMDB title: any movie whose TMDB title contains "wwe".
 	{Name: "WWE PLE (wwe-prefixed)", Keywords: []string{"wwe"}, RequireWWEPrefix: false},
+	// Catch-all by TMDB production company: any movie produced by WWE
+	// (production_companies id 146598). TMDB sometimes drops the "WWE " prefix
+	// from PLE titles (e.g. "Clash in Italy" 2026), so neither the specific
+	// keyword entries above nor the "wwe"-keyword catch-all fire. Matching the
+	// production company catches those. Listed LAST so the more-specific entries
+	// still win when they match (better log label and explicit scene-title
+	// overrides take effect).
+	{Name: "WWE PLE (production company)", ProductionCompanyIDs: []int{146598}, RequireWWEPrefix: true},
 }
 
 // Builtin returns a copy of the default registry.
@@ -95,10 +106,18 @@ func Builtin() []Movie {
 
 // Lookup reports whether the requested movie is event-organised. extra entries
 // (from config) are checked before the built-ins so operators can override.
-// Matching is by TMDB id, then IMDb id, then keyword match against the title.
-func Lookup(extra []Movie, imdbID string, tmdbID int, tmdbTitle, originalTitle string) (Movie, bool) {
+// Matching is by TMDB id, then IMDb id, then keyword match against the title,
+// then TMDB production-company id.
+func Lookup(extra []Movie, imdbID string, tmdbID int, tmdbTitle, originalTitle string, productionCompanyIDs []int) (Movie, bool) {
 	name := strings.ToLower(strings.TrimSpace(tmdbTitle) + " " + strings.TrimSpace(originalTitle))
 	imdb := strings.ToLower(strings.TrimSpace(imdbID))
+
+	companySet := make(map[int]struct{}, len(productionCompanyIDs))
+	for _, id := range productionCompanyIDs {
+		if id > 0 {
+			companySet[id] = struct{}{}
+		}
+	}
 
 	candidates := make([]Movie, 0, len(extra)+len(builtin))
 	candidates = append(candidates, extra...)
@@ -133,6 +152,13 @@ func Lookup(extra []Movie, imdbID string, tmdbID int, tmdbTitle, originalTitle s
 			}
 			if matched {
 				return movie, true
+			}
+		}
+		if len(movie.ProductionCompanyIDs) > 0 && len(companySet) > 0 {
+			for _, id := range movie.ProductionCompanyIDs {
+				if _, ok := companySet[id]; ok {
+					return movie, true
+				}
 			}
 		}
 	}

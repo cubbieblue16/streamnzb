@@ -1616,7 +1616,13 @@ func (s *Server) buildSearchParamsBase(contentType, id string, searchQuery *conf
 		tmdbNum, _ := strconv.Atoi(req.TMDBID)
 		movieTitle := strings.TrimSpace(params.Metadata.MovieDetails.Title)
 		movieOriginal := strings.TrimSpace(params.Metadata.MovieDetails.OriginalTitle)
-		if movie, ok := eventbased.Lookup(s.config.EventBasedMovies, req.IMDbID, tmdbNum, movieTitle, movieOriginal); ok {
+		productionCompanyIDs := make([]int, 0, len(params.Metadata.MovieDetails.ProductionCompanies))
+		for _, pc := range params.Metadata.MovieDetails.ProductionCompanies {
+			if pc.ID > 0 {
+				productionCompanyIDs = append(productionCompanyIDs, pc.ID)
+			}
+		}
+		if movie, ok := eventbased.Lookup(s.config.EventBasedMovies, req.IMDbID, tmdbNum, movieTitle, movieOriginal, productionCompanyIDs); ok {
 			sceneTitles := movie.DeriveSceneTitles(movieTitle)
 			// Also include a year-suffixed variant for each derived scene title so
 			// PLE releases that carry only the year (no edition number) still match.
@@ -1639,6 +1645,7 @@ func (s *Server) buildSearchParamsBase(contentType, id string, searchQuery *conf
 				"movie", movie.Name,
 				"tmdb_title", movieTitle,
 				"scene_titles", sceneTitles,
+				"production_company_ids", productionCompanyIDs,
 			)
 		}
 	}

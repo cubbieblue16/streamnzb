@@ -252,11 +252,19 @@ func (c *Client) GetExternalIDs(tmdbID int, mediaType string) (*ExternalIDsRespo
 }
 
 type MovieDetails struct {
-	ID               int    `json:"id"`
-	Title            string `json:"title"`
-	ReleaseDate      string `json:"release_date"`
-	OriginalTitle    string `json:"original_title"`
-	OriginalLanguage string `json:"original_language"`
+	ID                  int                 `json:"id"`
+	Title               string              `json:"title"`
+	ReleaseDate         string              `json:"release_date"`
+	OriginalTitle       string              `json:"original_title"`
+	OriginalLanguage    string              `json:"original_language"`
+	ProductionCompanies []ProductionCompany `json:"production_companies"`
+}
+
+// ProductionCompany is the subset of TMDB's production_companies entry we care
+// about. The id is what we match on (e.g. 146598 = WWE).
+type ProductionCompany struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
 }
 
 type TVDetails struct {
