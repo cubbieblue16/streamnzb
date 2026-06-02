@@ -1728,6 +1728,13 @@ func (s *Server) buildSearchParamsFromBase(base *SearchParams, searchQuery *conf
 		includeYear = false
 		req.EventBased = true
 		req.EventSceneTitles = append([]string(nil), params.Metadata.EventSceneTitles...)
+		// Broaden the category filter. TMDB lists WWE PLEs as movies, so the
+		// default cat=2000 (Movies/All) gets used; but every scene release of a
+		// PLE is uploaded to indexers under cat=5000/5060 (TV / TV-Sport). With
+		// only 2000 we get zero hits even though the releases exist. Include the
+		// TV categories alongside Movies — token-subset validation against the
+		// scene title still rejects unrelated cross-category matches.
+		req.Cat = "2000,5000,5060"
 	}
 	req.SeriesSearchScope = scope
 	req.EnableYearValidation = includeYear
@@ -1775,6 +1782,16 @@ func (s *Server) buildSearchParamsFromBase(base *SearchParams, searchQuery *conf
 			if strings.EqualFold(ic.Type, "easynews") {
 				t := true
 				eff.DisableIdSearch = &t
+			}
+			// Event-based movies (WWE PLEs) ship under TV categories on indexers
+			// even though TMDB lists them as movies. Override MovieCategories so
+			// the newznab Search call includes 5000/5060 alongside 2000; without
+			// this, indexer-level "movie_categories":"2000" would clobber req.Cat
+			// and every PLE search returns zero. Token-subset validation against
+			// the scene title still gates the broadened category set.
+			if contentType == "movie" && params.Metadata != nil && params.Metadata.EventBased {
+				cats := "2000,5000,5060"
+				eff.MovieCategories = &cats
 			}
 			req.EffectiveByIndexer[ic.Name] = eff
 			indexerTypeByName[ic.Name] = ic.Type
