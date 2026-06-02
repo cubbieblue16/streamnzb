@@ -85,7 +85,7 @@ func TestLookupMatchesAEWByPinnedID(t *testing.T) {
 
 // Production-company catch-all: a future AEW show with an unknown id but
 // produced by AEW (company 119828) must be picked up and have its scene title
-// derived correctly.
+// derived correctly. "Battle of the Belts" → 4 tokens → unprefixed kept.
 func TestLookupMatchesByAEWProductionCompany(t *testing.T) {
 	show, ok := Lookup(nil, "", 999999, "All Elite Wrestling: Battle of the Belts", "", []int{119828})
 	if !ok {
@@ -102,7 +102,8 @@ func TestLookupMatchesByAEWProductionCompany(t *testing.T) {
 }
 
 // WWE production-company catch-all should fire for shows produced by WWE
-// (company 146598) even when name/id aren't in the registry.
+// (company 146598) even when name/id aren't in the registry. Multi-token →
+// un-prefixed fallback retained.
 func TestLookupMatchesByWWEProductionCompany(t *testing.T) {
 	show, ok := Lookup(nil, "", 999998, "Some New WWE Show", "", []int{146598})
 	if !ok {
@@ -176,10 +177,10 @@ func TestDeriveSceneTitlesStripsAndPrefixes(t *testing.T) {
 			expected: []string{"AEW Battle of the Belts", "Battle of the Belts"},
 		},
 		{
-			name:     "explicit scene titles win over derivation",
+			name:     "explicit scene titles win over derivation, single-token unprefixed dropped",
 			show:     Show{SceneTitles: []string{"WWE Monday Night RAW", "WWE RAW"}, RequirePrefix: "WWE"},
 			input:    "Raw",
-			expected: []string{"WWE Monday Night RAW", "Monday Night RAW", "WWE RAW", "RAW"},
+			expected: []string{"WWE Monday Night RAW", "Monday Night RAW", "WWE RAW"},
 		},
 		{
 			name:     "no scene titles, no TMDB name returns nil",

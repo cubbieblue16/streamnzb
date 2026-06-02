@@ -213,11 +213,12 @@ func (s Show) DeriveSceneTitles(tmdbName string) []string {
 	return uniqueLowerOrdered(applyPrefix(base, s.RequirePrefix))
 }
 
-// applyPrefix returns titles with the brand prefix applied (when set). For
-// each input title, it emits the prefix-prepended form and the un-prefixed
-// fallback (so a release missing the brand prefix still passes token-subset
-// validation). Titles that already lead with the prefix are emitted as-is plus
-// a stripped variant.
+// applyPrefix returns titles with the brand prefix applied (when set). The
+// prefix-prepended form is always emitted. The un-prefixed fallback is ONLY
+// emitted when the remaining base (minus a trailing year) is multi-token —
+// single-token bases like "Revolution 2025" → "Revolution" collide with common
+// English words and produce false positives. Real WWE/AEW releases virtually
+// always carry the brand prefix, so dropping the single-token fallback is safe.
 func applyPrefix(in []string, prefix string) []string {
 	prefix = strings.TrimSpace(prefix)
 	if prefix == "" {
@@ -225,17 +226,48 @@ func applyPrefix(in []string, prefix string) []string {
 	}
 	out := make([]string, 0, len(in)*2)
 	for _, t := range in {
+		var prefixed, rest string
 		if hasPrefix(t, prefix) {
-			out = append(out, t)
-			if rest := strings.TrimSpace(t[len(prefix):]); rest != "" {
-				out = append(out, rest)
-			}
+			prefixed = t
+			rest = strings.TrimSpace(t[len(prefix):])
 		} else {
-			out = append(out, prefix+" "+t)
-			out = append(out, t)
+			prefixed = prefix + " " + t
+			rest = t
+		}
+		out = append(out, prefixed)
+		if rest != "" && isMultiTokenAfterYear(rest) {
+			out = append(out, rest)
 		}
 	}
 	return out
+}
+
+// isMultiTokenAfterYear reports whether s has 2+ non-year tokens. Used to gate
+// the un-prefixed fallback variant in applyPrefix: single-token bases like
+// "Revolution" or "Dynasty" (after stripping the year) are too generic to match
+// safely without the brand prefix.
+func isMultiTokenAfterYear(s string) bool {
+	count := 0
+	for _, w := range strings.Fields(s) {
+		// strip a trailing 4-digit year token
+		if len(w) == 4 {
+			allDigit := true
+			for _, r := range w {
+				if r < '0' || r > '9' {
+					allDigit = false
+					break
+				}
+			}
+			if allDigit {
+				continue
+			}
+		}
+		count++
+		if count >= 2 {
+			return true
+		}
+	}
+	return false
 }
 
 // stripLeadingPrefix returns name with the first matching prefix from

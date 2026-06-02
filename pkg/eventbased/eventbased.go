@@ -221,17 +221,47 @@ func (m Movie) DeriveSceneTitles(tmdbTitle string) []string {
 	}
 	out := make([]string, 0, len(base)*2)
 	for _, t := range base {
+		var prefixed, rest string
 		if hasPrefix(t, prefix) {
-			out = append(out, t)
-			if rest := strings.TrimSpace(t[len(prefix):]); rest != "" {
-				out = append(out, rest)
-			}
+			prefixed = t
+			rest = strings.TrimSpace(t[len(prefix):])
 		} else {
-			out = append(out, prefix+" "+t)
-			out = append(out, t)
+			prefixed = prefix + " " + t
+			rest = t
+		}
+		out = append(out, prefixed)
+		// Only emit the un-prefixed fallback when the base (minus year) is
+		// multi-token. Single-token bases like "Revolution 2025" → "Revolution"
+		// collide with common English words and produce false positives.
+		if rest != "" && isMultiTokenAfterYear(rest) {
+			out = append(out, rest)
 		}
 	}
 	return uniqueLowerOrdered(out)
+}
+
+// isMultiTokenAfterYear reports whether s has 2+ non-year tokens.
+func isMultiTokenAfterYear(s string) bool {
+	count := 0
+	for _, w := range strings.Fields(s) {
+		if len(w) == 4 {
+			allDigit := true
+			for _, r := range w {
+				if r < '0' || r > '9' {
+					allDigit = false
+					break
+				}
+			}
+			if allDigit {
+				continue
+			}
+		}
+		count++
+		if count >= 2 {
+			return true
+		}
+	}
+	return false
 }
 
 // hasPrefix reports whether s starts with prefix followed by a separator

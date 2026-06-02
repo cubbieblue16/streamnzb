@@ -166,6 +166,7 @@ func TestDeriveSceneTitlesPrependsWWE(t *testing.T) {
 		t.Fatalf("expected WrestleMania match")
 	}
 	got := m.DeriveSceneTitles("WrestleMania XL")
+	// "WrestleMania XL" → 2 tokens (no year), un-prefixed fallback retained.
 	want := []string{"WWE WrestleMania XL", "WrestleMania XL"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("DeriveSceneTitles = %v, want %v", got, want)
@@ -178,9 +179,9 @@ func TestDeriveSceneTitlesPrependsAEW(t *testing.T) {
 		t.Fatalf("expected WrestleDream match")
 	}
 	got := m.DeriveSceneTitles("AEW WrestleDream 2025")
-	// "AEW WrestleDream 2025" already starts with AEW, so the prefixed form is
-	// the input itself; the un-prefixed fallback strips it.
-	want := []string{"AEW WrestleDream 2025", "WrestleDream 2025"}
+	// "AEW WrestleDream 2025" already starts with AEW. Un-prefixed fallback
+	// "WrestleDream 2025" → 1 non-year token → dropped.
+	want := []string{"AEW WrestleDream 2025"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("DeriveSceneTitles = %v, want %v", got, want)
 	}
@@ -192,7 +193,22 @@ func TestDeriveSceneTitlesKeepsWWEPrefixWhenAlreadyPresent(t *testing.T) {
 		t.Fatalf("expected SummerSlam match")
 	}
 	got := m.DeriveSceneTitles("WWE SummerSlam 2024")
-	want := []string{"WWE SummerSlam 2024", "SummerSlam 2024"}
+	// "SummerSlam 2024" → 1 non-year token → un-prefixed dropped.
+	want := []string{"WWE SummerSlam 2024"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("DeriveSceneTitles = %v, want %v", got, want)
+	}
+}
+
+func TestDeriveSceneTitlesKeepsUnprefixedWhenMultiToken(t *testing.T) {
+	// "Clash in Italy" → 3 tokens → un-prefixed fallback retained so releases
+	// missing the brand prefix can still match.
+	m, ok := Lookup(nil, "", 0, "Clash in Italy", "", []int{146598})
+	if !ok {
+		t.Fatalf("expected production-company match")
+	}
+	got := m.DeriveSceneTitles("Clash in Italy")
+	want := []string{"WWE Clash in Italy", "Clash in Italy"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("DeriveSceneTitles = %v, want %v", got, want)
 	}
@@ -204,8 +220,8 @@ func TestDeriveSceneTitlesExplicitOverridesUsedAsIs(t *testing.T) {
 		RequirePrefix: "WWE",
 	}
 	got := m.DeriveSceneTitles("Ignored")
-	// RequirePrefix still applies to explicit titles when missing.
-	want := []string{"WWE Foo", "Foo", "WWE Bar", "Bar"}
+	// RequirePrefix prepends. "Foo" / "Bar" are single-token → un-prefixed dropped.
+	want := []string{"WWE Foo", "WWE Bar"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("DeriveSceneTitles = %v, want %v", got, want)
 	}
