@@ -268,13 +268,14 @@ type ProductionCompany struct {
 }
 
 type TVDetails struct {
-	ID               int            `json:"id"`
-	Name             string         `json:"name"`
-	OriginalName     string         `json:"original_name"`
-	OriginalLanguage string         `json:"original_language"`
-	FirstAirDate     string         `json:"first_air_date"`
-	NumberOfSeasons  int            `json:"number_of_seasons"`
-	Seasons          []TVSeasonInfo `json:"seasons"`
+	ID                  int                 `json:"id"`
+	Name                string              `json:"name"`
+	OriginalName        string              `json:"original_name"`
+	OriginalLanguage    string              `json:"original_language"`
+	FirstAirDate        string              `json:"first_air_date"`
+	NumberOfSeasons     int                 `json:"number_of_seasons"`
+	Seasons             []TVSeasonInfo      `json:"seasons"`
+	ProductionCompanies []ProductionCompany `json:"production_companies"`
 }
 
 type TVSeasonInfo struct {

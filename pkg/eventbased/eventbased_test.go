@@ -42,7 +42,47 @@ func TestLookupMatchesPLEsByKeyword(t *testing.T) {
 	}
 }
 
-func TestLookupRejectsNonPLE(t *testing.T) {
+func TestLookupMatchesAEWPPVsByKeyword(t *testing.T) {
+	cases := []struct {
+		tmdbTitle string
+		wantName  string
+	}{
+		{"AEW All In 2025: Texas", "AEW PPV: All In"},
+		{"AEW All Out 2024", "AEW PPV: All Out"},
+		{"AEW Double or Nothing 2024", "AEW PPV: Double or Nothing"},
+		{"AEW Revolution 2025", "AEW PPV: Revolution"},
+		{"AEW x NJPW Present Forbidden Door 2024", "AEW PPV: Forbidden Door"},
+		{"AEW Full Gear 2023", "AEW PPV: Full Gear"},
+		{"AEW WrestleDream 2024", "AEW PPV: WrestleDream"},
+		{"AEW Worlds End 2024", "AEW PPV: Worlds End"},
+		{"AEW Dynasty 2025", "AEW PPV: Dynasty"},
+		{"AEW Grand Slam Australia", "AEW PPV: Grand Slam"},
+		{"AEW Some Future Show", "AEW PPV (aew-prefixed)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.tmdbTitle, func(t *testing.T) {
+			m, ok := Lookup(nil, "", 0, tc.tmdbTitle, "", nil)
+			if !ok {
+				t.Fatalf("expected %q to match an AEW PPV", tc.tmdbTitle)
+			}
+			if m.Name != tc.wantName {
+				t.Fatalf("Lookup(%q) = %q, want %q", tc.tmdbTitle, m.Name, tc.wantName)
+			}
+		})
+	}
+}
+
+// AEW keyword entries that require "aew" alongside the event word must NOT
+// false-positive on generic English movie titles.
+func TestLookupRejectsGenericTitlesNotAEW(t *testing.T) {
+	for _, title := range []string{"Revolution", "Dynasty", "Grand Slam", "All In"} {
+		if m, ok := Lookup(nil, "", 0, title, "", nil); ok {
+			t.Fatalf("Lookup(%q) unexpectedly matched %+v", title, m)
+		}
+	}
+}
+
+func TestLookupRejectsNonEvent(t *testing.T) {
 	for _, title := range []string{"Interstellar", "Breaking Bad", "Royal Tenenbaums", "Bash", "Inception"} {
 		if m, ok := Lookup(nil, "", 0, title, "", nil); ok {
 			t.Fatalf("Lookup(%q) unexpectedly matched %+v", title, m)
@@ -52,11 +92,11 @@ func TestLookupRejectsNonPLE(t *testing.T) {
 
 func TestLookupMatchesByID(t *testing.T) {
 	extra := []Movie{{
-		Name:             "Custom PLE",
-		TMDBIDs:          []int{99999},
-		IMDbIDs:          []string{"tt1234567"},
-		SceneTitles:      []string{"WWE Custom Show"},
-		RequireWWEPrefix: true,
+		Name:          "Custom PLE",
+		TMDBIDs:       []int{99999},
+		IMDbIDs:       []string{"tt1234567"},
+		SceneTitles:   []string{"WWE Custom Show"},
+		RequirePrefix: "WWE",
 	}}
 	if m, ok := Lookup(extra, "", 99999, "Anything", "", nil); !ok || m.Name != "Custom PLE" {
 		t.Fatalf("expected TMDB id match, got ok=%v movie=%+v", ok, m)
@@ -68,7 +108,7 @@ func TestLookupMatchesByID(t *testing.T) {
 
 // "Clash in Italy" (TMDB 1704958) — title carries NO "WWE" prefix and no PLE
 // keyword in the registry matches. Production-company match is what catches it.
-func TestLookupMatchesByProductionCompany(t *testing.T) {
+func TestLookupMatchesByWWEProductionCompany(t *testing.T) {
 	m, ok := Lookup(nil, "tt40017618", 1704958, "Clash in Italy", "Clash in Italy", []int{146598})
 	if !ok {
 		t.Fatalf("expected production-company match for Clash in Italy")
@@ -78,6 +118,23 @@ func TestLookupMatchesByProductionCompany(t *testing.T) {
 	}
 	titles := m.DeriveSceneTitles("Clash in Italy")
 	want := []string{"WWE Clash in Italy", "Clash in Italy"}
+	if !reflect.DeepEqual(titles, want) {
+		t.Fatalf("DeriveSceneTitles = %v, want %v", titles, want)
+	}
+}
+
+// An AEW PPV that lost its "AEW " prefix on TMDB but is produced by company
+// 119828 should still match via the production-company catch-all.
+func TestLookupMatchesByAEWProductionCompany(t *testing.T) {
+	m, ok := Lookup(nil, "", 999999, "Some Future Event", "", []int{119828})
+	if !ok {
+		t.Fatalf("expected AEW production-company match")
+	}
+	if m.Name != "AEW PPV (production company)" {
+		t.Fatalf("Lookup name = %q, want %q", m.Name, "AEW PPV (production company)")
+	}
+	titles := m.DeriveSceneTitles("Some Future Event")
+	want := []string{"AEW Some Future Event", "Some Future Event"}
 	if !reflect.DeepEqual(titles, want) {
 		t.Fatalf("DeriveSceneTitles = %v, want %v", titles, want)
 	}
@@ -115,6 +172,20 @@ func TestDeriveSceneTitlesPrependsWWE(t *testing.T) {
 	}
 }
 
+func TestDeriveSceneTitlesPrependsAEW(t *testing.T) {
+	m, ok := Lookup(nil, "", 0, "AEW WrestleDream 2025", "", nil)
+	if !ok {
+		t.Fatalf("expected WrestleDream match")
+	}
+	got := m.DeriveSceneTitles("AEW WrestleDream 2025")
+	// "AEW WrestleDream 2025" already starts with AEW, so the prefixed form is
+	// the input itself; the un-prefixed fallback strips it.
+	want := []string{"AEW WrestleDream 2025", "WrestleDream 2025"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("DeriveSceneTitles = %v, want %v", got, want)
+	}
+}
+
 func TestDeriveSceneTitlesKeepsWWEPrefixWhenAlreadyPresent(t *testing.T) {
 	m, ok := Lookup(nil, "", 0, "WWE SummerSlam 2024", "", nil)
 	if !ok {
@@ -129,11 +200,11 @@ func TestDeriveSceneTitlesKeepsWWEPrefixWhenAlreadyPresent(t *testing.T) {
 
 func TestDeriveSceneTitlesExplicitOverridesUsedAsIs(t *testing.T) {
 	m := Movie{
-		SceneTitles:      []string{"Foo", "Bar"},
-		RequireWWEPrefix: true,
+		SceneTitles:   []string{"Foo", "Bar"},
+		RequirePrefix: "WWE",
 	}
 	got := m.DeriveSceneTitles("Ignored")
-	// RequireWWEPrefix still applies to explicit titles when missing.
+	// RequirePrefix still applies to explicit titles when missing.
 	want := []string{"WWE Foo", "Foo", "WWE Bar", "Bar"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("DeriveSceneTitles = %v, want %v", got, want)

@@ -1565,33 +1565,44 @@ func (s *Server) buildSearchParamsBase(contentType, id string, searchQuery *conf
 	if contentType == "series" && params.Metadata != nil {
 		tmdbNum, _ := strconv.Atoi(req.TMDBID)
 		var tvName, tvOriginal string
+		var tvProductionCompanyIDs []int
 		if params.Metadata.TVDetails != nil {
 			tvName = params.Metadata.TVDetails.Name
 			tvOriginal = params.Metadata.TVDetails.OriginalName
-		}
-		if show, ok := datebased.Lookup(s.config.DateBasedShows, req.IMDbID, tmdbNum, tvName, tvOriginal); ok {
-			params.Metadata.DateBased = true
-			params.Metadata.SeriesTitleOverrides = show.SceneTitles
-			params.Metadata.DateToleranceDays = show.Tolerance()
-			if s.tmdbClient != nil && tmdbNum > 0 && episodeNum > 0 {
-				if seasonDetails, err := s.tmdbClient.GetTVSeasonDetails(tmdbNum, seasonNum); err == nil {
-					for _, ep := range seasonDetails.Episodes {
-						if ep.EpisodeNumber == episodeNum {
-							params.Metadata.EpisodeAirDate = strings.TrimSpace(ep.AirDate)
-							break
-						}
-					}
-				} else {
-					logMetadataResolutionState(contentType, id, "tmdb_season_air_date", "tmdb_id", req.TMDBID, "season", seasonNum, "status", "failed", "err", err)
+			tvProductionCompanyIDs = make([]int, 0, len(params.Metadata.TVDetails.ProductionCompanies))
+			for _, pc := range params.Metadata.TVDetails.ProductionCompanies {
+				if pc.ID > 0 {
+					tvProductionCompanyIDs = append(tvProductionCompanyIDs, pc.ID)
 				}
 			}
-			logMetadataResolutionState(contentType, id, "date_based_show",
-				"tmdb_id", req.TMDBID,
-				"imdb_id", req.IMDbID,
-				"show", show.Name,
-				"air_date", params.Metadata.EpisodeAirDate,
-				"scene_titles", show.SceneTitles,
-			)
+		}
+		if show, ok := datebased.Lookup(s.config.DateBasedShows, req.IMDbID, tmdbNum, tvName, tvOriginal, tvProductionCompanyIDs); ok {
+			sceneTitles := show.DeriveSceneTitles(tvName)
+			if len(sceneTitles) > 0 {
+				params.Metadata.DateBased = true
+				params.Metadata.SeriesTitleOverrides = sceneTitles
+				params.Metadata.DateToleranceDays = show.Tolerance()
+				if s.tmdbClient != nil && tmdbNum > 0 && episodeNum > 0 {
+					if seasonDetails, err := s.tmdbClient.GetTVSeasonDetails(tmdbNum, seasonNum); err == nil {
+						for _, ep := range seasonDetails.Episodes {
+							if ep.EpisodeNumber == episodeNum {
+								params.Metadata.EpisodeAirDate = strings.TrimSpace(ep.AirDate)
+								break
+							}
+						}
+					} else {
+						logMetadataResolutionState(contentType, id, "tmdb_season_air_date", "tmdb_id", req.TMDBID, "season", seasonNum, "status", "failed", "err", err)
+					}
+				}
+				logMetadataResolutionState(contentType, id, "date_based_show",
+					"tmdb_id", req.TMDBID,
+					"imdb_id", req.IMDbID,
+					"show", show.Name,
+					"air_date", params.Metadata.EpisodeAirDate,
+					"scene_titles", sceneTitles,
+					"production_company_ids", tvProductionCompanyIDs,
+				)
+			}
 		}
 	}
 	if contentType == "movie" && req.TMDBID != "" && s.tmdbClient != nil {

@@ -3,23 +3,25 @@
 // canonical title.
 //
 // WWE Premium Live Events (WrestleMania, Royal Rumble, SummerSlam, Survivor
-// Series, ...) are the canonical case: TMDB lists each PLE as its own movie
-// entry, often without the "WWE" prefix that scene releases always carry
-// ("WWE.WrestleMania.40.Night.1.2024..."). The default movie search emits
-// "<TMDB title> <year>" and validation's fuzzy title gate (which expects the
-// requested words as a contiguous block with only articles before) drops any
-// release whose parsed title leads with extra tokens like "WWE" or trails
-// with "Night 1". Both gates fire even when the release is correct.
+// Series, ...) and AEW PPVs (All In, Double or Nothing, Revolution, ...) are
+// the canonical cases: TMDB lists each event as its own movie entry, often
+// without the brand prefix that scene releases always carry
+// ("WWE.WrestleMania.40.Night.1.2024...", "AEW.WrestleDream.2025..."). The
+// default movie search emits "<TMDB title> <year>" and validation's fuzzy
+// title gate (which expects the requested words as a contiguous block with
+// only articles before) drops any release whose parsed title leads with extra
+// tokens or trails with "Night 1". Both gates fire even when the release is
+// correct.
 //
 // For a registered event movie we instead:
-//   - override the search title to the scene title(s) (with "WWE " prefix
+//   - override the search title to the scene title(s) (with the brand prefix
 //     prepended when required by the entry), and
 //   - validate with token-subset matching: a release is accepted when its
 //     parsed title contains every token of at least one scene title, in any
 //     order, regardless of leading/trailing extras.
 //
 // This mirrors the pkg/datebased pattern but for the movie path. The built-in
-// registry covers WWE PLE event keywords; operators can add or override
+// registry covers WWE and AEW event keywords; operators can add or override
 // entries via the "event_based_movies" config field without recompiling.
 package eventbased
 
@@ -38,65 +40,96 @@ type Movie struct {
 	// ProductionCompanyIDs match by TMDB production_companies: any one of the
 	// listed ids appearing on the movie counts as a match. Used as a structural
 	// fallback for franchises where TMDB titles drift in/out of carrying the
-	// brand prefix (e.g. WWE PLEs that TMDB sometimes titles without "WWE").
+	// brand prefix (e.g. WWE PLEs that TMDB sometimes titles without "WWE",
+	// AEW PPVs distributed under variant names).
 	ProductionCompanyIDs []int `json:"production_company_ids,omitempty"`
 	// SceneTitles, when set, override the derived scene title list. Each entry
 	// is used as-is. When empty, the TMDB title is used as the base (optionally
-	// prepended with "WWE " per RequireWWEPrefix).
+	// prepended with the brand prefix per RequirePrefix).
 	SceneTitles []string `json:"scene_titles,omitempty"`
-	// RequireWWEPrefix prepends "WWE " to the TMDB-derived scene title when it
-	// is missing. Has no effect on explicit SceneTitles entries.
-	RequireWWEPrefix bool `json:"require_wwe_prefix,omitempty"`
+	// RequirePrefix, when non-empty, prepends "<prefix> " to the derived scene
+	// title (and to explicit SceneTitles entries that don't already lead with
+	// it) so releases that always carry the brand prefix still match. Common
+	// values: "WWE", "AEW". Replaces the older RequireWWEPrefix boolean — JSON
+	// configs using "require_wwe_prefix" must migrate to "require_prefix".
+	RequirePrefix string `json:"require_prefix,omitempty"`
 }
 
 // builtin is the default registry of event-organised movies.
 //
 // Keyword matching is intentionally tolerant - any movie whose TMDB title
-// contains a known PLE event word (case-insensitive, every listed keyword must
-// appear) is treated as a WWE PLE. The catch-all "wwe" entry covers PLEs not
-// otherwise listed when TMDB happens to include the WWE prefix.
+// contains a known event word (case-insensitive, every listed keyword must
+// appear) is treated as a registered event. Catch-all entries by TMDB title
+// prefix and by production_company id handle PPVs not otherwise listed.
 var builtin = []Movie{
-	{Name: "WWE PLE: WrestleMania", Keywords: []string{"wrestlemania"}, RequireWWEPrefix: true},
-	{Name: "WWE PLE: Royal Rumble", Keywords: []string{"royal rumble"}, RequireWWEPrefix: true},
-	{Name: "WWE PLE: SummerSlam", Keywords: []string{"summerslam"}, RequireWWEPrefix: true},
-	{Name: "WWE PLE: Survivor Series", Keywords: []string{"survivor series"}, RequireWWEPrefix: true},
-	{Name: "WWE PLE: Money in the Bank", Keywords: []string{"money in the bank"}, RequireWWEPrefix: true},
-	{Name: "WWE PLE: Elimination Chamber", Keywords: []string{"elimination chamber"}, RequireWWEPrefix: true},
-	{Name: "WWE PLE: Hell in a Cell", Keywords: []string{"hell in a cell"}, RequireWWEPrefix: true},
-	{Name: "WWE PLE: Extreme Rules", Keywords: []string{"extreme rules"}, RequireWWEPrefix: true},
-	{Name: "WWE PLE: Backlash", Keywords: []string{"backlash"}, RequireWWEPrefix: true},
-	{Name: "WWE PLE: Crown Jewel", Keywords: []string{"crown jewel"}, RequireWWEPrefix: true},
+	// --- WWE PLEs (keyword) ---
+	{Name: "WWE PLE: WrestleMania", Keywords: []string{"wrestlemania"}, RequirePrefix: "WWE"},
+	{Name: "WWE PLE: Royal Rumble", Keywords: []string{"royal rumble"}, RequirePrefix: "WWE"},
+	{Name: "WWE PLE: SummerSlam", Keywords: []string{"summerslam"}, RequirePrefix: "WWE"},
+	{Name: "WWE PLE: Survivor Series", Keywords: []string{"survivor series"}, RequirePrefix: "WWE"},
+	{Name: "WWE PLE: Money in the Bank", Keywords: []string{"money in the bank"}, RequirePrefix: "WWE"},
+	{Name: "WWE PLE: Elimination Chamber", Keywords: []string{"elimination chamber"}, RequirePrefix: "WWE"},
+	{Name: "WWE PLE: Hell in a Cell", Keywords: []string{"hell in a cell"}, RequirePrefix: "WWE"},
+	{Name: "WWE PLE: Extreme Rules", Keywords: []string{"extreme rules"}, RequirePrefix: "WWE"},
+	{Name: "WWE PLE: Backlash", Keywords: []string{"backlash"}, RequirePrefix: "WWE"},
+	{Name: "WWE PLE: Crown Jewel", Keywords: []string{"crown jewel"}, RequirePrefix: "WWE"},
 	// More specific PLE first so "King and Queen" doesn't lose to "Queen of the Ring".
-	{Name: "WWE PLE: King and Queen of the Ring", Keywords: []string{"king and queen of the ring"}, RequireWWEPrefix: true},
-	{Name: "WWE PLE: King of the Ring", Keywords: []string{"king of the ring"}, RequireWWEPrefix: true},
-	{Name: "WWE PLE: Queen of the Ring", Keywords: []string{"queen of the ring"}, RequireWWEPrefix: true},
-	{Name: "WWE PLE: Bash in Berlin", Keywords: []string{"bash in berlin"}, RequireWWEPrefix: true},
-	{Name: "WWE PLE: Clash at the Castle", Keywords: []string{"clash at the castle"}, RequireWWEPrefix: true},
-	{Name: "WWE PLE: Bad Blood", Keywords: []string{"bad blood"}, RequireWWEPrefix: true},
-	{Name: "WWE PLE: Night of Champions", Keywords: []string{"night of champions"}, RequireWWEPrefix: true},
-	{Name: "WWE PLE: Saturday Night's Main Event", Keywords: []string{"saturday night", "main event"}, RequireWWEPrefix: true},
-	{Name: "WWE PLE: Fastlane", Keywords: []string{"fastlane"}, RequireWWEPrefix: true},
-	{Name: "WWE PLE: Payback", Keywords: []string{"payback"}, RequireWWEPrefix: true},
-	{Name: "WWE PLE: Vengeance", Keywords: []string{"vengeance"}, RequireWWEPrefix: true},
-	{Name: "WWE PLE: No Way Out", Keywords: []string{"no way out"}, RequireWWEPrefix: true},
-	{Name: "WWE PLE: Battleground", Keywords: []string{"battleground"}, RequireWWEPrefix: true},
-	{Name: "WWE PLE: Stomping Grounds", Keywords: []string{"stomping grounds"}, RequireWWEPrefix: true},
-	{Name: "WWE PLE: Great American Bash", Keywords: []string{"great american bash"}, RequireWWEPrefix: true},
-	{Name: "WWE PLE: Greatest Royal Rumble", Keywords: []string{"greatest royal rumble"}, RequireWWEPrefix: true},
-	{Name: "WWE PLE: TLC", Keywords: []string{"tlc"}, RequireWWEPrefix: true},
-	{Name: "WWE PLE: Day 1", Keywords: []string{"wwe day 1"}, RequireWWEPrefix: true},
-	{Name: "WWE PLE: Evolution", Keywords: []string{"wwe evolution"}, RequireWWEPrefix: true},
-	{Name: "WWE PLE: Worlds Collide", Keywords: []string{"worlds collide"}, RequireWWEPrefix: true},
+	{Name: "WWE PLE: King and Queen of the Ring", Keywords: []string{"king and queen of the ring"}, RequirePrefix: "WWE"},
+	{Name: "WWE PLE: King of the Ring", Keywords: []string{"king of the ring"}, RequirePrefix: "WWE"},
+	{Name: "WWE PLE: Queen of the Ring", Keywords: []string{"queen of the ring"}, RequirePrefix: "WWE"},
+	{Name: "WWE PLE: Bash in Berlin", Keywords: []string{"bash in berlin"}, RequirePrefix: "WWE"},
+	{Name: "WWE PLE: Clash at the Castle", Keywords: []string{"clash at the castle"}, RequirePrefix: "WWE"},
+	{Name: "WWE PLE: Bad Blood", Keywords: []string{"bad blood"}, RequirePrefix: "WWE"},
+	{Name: "WWE PLE: Night of Champions", Keywords: []string{"night of champions"}, RequirePrefix: "WWE"},
+	{Name: "WWE PLE: Saturday Night's Main Event", Keywords: []string{"saturday night", "main event"}, RequirePrefix: "WWE"},
+	{Name: "WWE PLE: Fastlane", Keywords: []string{"fastlane"}, RequirePrefix: "WWE"},
+	{Name: "WWE PLE: Payback", Keywords: []string{"payback"}, RequirePrefix: "WWE"},
+	{Name: "WWE PLE: Vengeance", Keywords: []string{"vengeance"}, RequirePrefix: "WWE"},
+	{Name: "WWE PLE: No Way Out", Keywords: []string{"no way out"}, RequirePrefix: "WWE"},
+	{Name: "WWE PLE: Battleground", Keywords: []string{"battleground"}, RequirePrefix: "WWE"},
+	{Name: "WWE PLE: Stomping Grounds", Keywords: []string{"stomping grounds"}, RequirePrefix: "WWE"},
+	{Name: "WWE PLE: Great American Bash", Keywords: []string{"great american bash"}, RequirePrefix: "WWE"},
+	{Name: "WWE PLE: Greatest Royal Rumble", Keywords: []string{"greatest royal rumble"}, RequirePrefix: "WWE"},
+	{Name: "WWE PLE: TLC", Keywords: []string{"tlc"}, RequirePrefix: "WWE"},
+	{Name: "WWE PLE: Day 1", Keywords: []string{"wwe day 1"}, RequirePrefix: "WWE"},
+	{Name: "WWE PLE: Evolution", Keywords: []string{"wwe evolution"}, RequirePrefix: "WWE"},
+	{Name: "WWE PLE: Worlds Collide", Keywords: []string{"worlds collide"}, RequirePrefix: "WWE"},
+
+	// --- AEW PPVs (keyword) ---
+	// TMDB titles all carry an "AEW " prefix today (e.g. "AEW Revolution 2025"),
+	// so RequirePrefix is mostly belt-and-suspenders. Keyword "aew" is required
+	// alongside the event word so generic English titles ("Revolution", "Dynasty")
+	// don't false-positive into AEW.
+	{Name: "AEW PPV: All In", Keywords: []string{"aew", "all in"}, RequirePrefix: "AEW"},
+	{Name: "AEW PPV: All Out", Keywords: []string{"aew", "all out"}, RequirePrefix: "AEW"},
+	{Name: "AEW PPV: Double or Nothing", Keywords: []string{"double or nothing"}, RequirePrefix: "AEW"},
+	{Name: "AEW PPV: Revolution", Keywords: []string{"aew", "revolution"}, RequirePrefix: "AEW"},
+	{Name: "AEW PPV: Forbidden Door", Keywords: []string{"forbidden door"}, RequirePrefix: "AEW"},
+	{Name: "AEW PPV: Full Gear", Keywords: []string{"full gear"}, RequirePrefix: "AEW"},
+	{Name: "AEW PPV: WrestleDream", Keywords: []string{"wrestledream"}, RequirePrefix: "AEW"},
+	{Name: "AEW PPV: Worlds End", Keywords: []string{"worlds end"}, RequirePrefix: "AEW"},
+	{Name: "AEW PPV: Dynasty", Keywords: []string{"aew", "dynasty"}, RequirePrefix: "AEW"},
+	{Name: "AEW PPV: Grand Slam", Keywords: []string{"aew", "grand slam"}, RequirePrefix: "AEW"},
+	{Name: "AEW PPV: Beach Break", Keywords: []string{"beach break"}, RequirePrefix: "AEW"},
+	{Name: "AEW PPV: Blood and Guts", Keywords: []string{"blood and guts"}, RequirePrefix: "AEW"},
+	{Name: "AEW PPV: Fight for the Fallen", Keywords: []string{"fight for the fallen"}, RequirePrefix: "AEW"},
+	{Name: "AEW PPV: Fyter Fest", Keywords: []string{"fyter fest"}, RequirePrefix: "AEW"},
+	{Name: "AEW PPV: Winter Is Coming", Keywords: []string{"winter is coming"}, RequirePrefix: "AEW"},
+
 	// Catch-all by TMDB title: any movie whose TMDB title contains "wwe".
-	{Name: "WWE PLE (wwe-prefixed)", Keywords: []string{"wwe"}, RequireWWEPrefix: false},
-	// Catch-all by TMDB production company: any movie produced by WWE
-	// (production_companies id 146598). TMDB sometimes drops the "WWE " prefix
-	// from PLE titles (e.g. "Clash in Italy" 2026), so neither the specific
-	// keyword entries above nor the "wwe"-keyword catch-all fire. Matching the
-	// production company catches those. Listed LAST so the more-specific entries
-	// still win when they match (better log label and explicit scene-title
-	// overrides take effect).
-	{Name: "WWE PLE (production company)", ProductionCompanyIDs: []int{146598}, RequireWWEPrefix: true},
+	{Name: "WWE PLE (wwe-prefixed)", Keywords: []string{"wwe"}, RequirePrefix: ""},
+	// Catch-all by TMDB title: any movie whose TMDB title contains "aew".
+	{Name: "AEW PPV (aew-prefixed)", Keywords: []string{"aew"}, RequirePrefix: "AEW"},
+
+	// Catch-all by TMDB production company. Listed LAST so the more-specific
+	// keyword entries still win (better log label, explicit RequirePrefix).
+	// WWE = id 146598. TMDB sometimes drops the "WWE " prefix from PLE titles
+	// (e.g. "Clash in Italy" 2026), so neither the WWE keywords nor the
+	// "wwe"-keyword catch-all fire. Matching the production company catches those.
+	{Name: "WWE PLE (production company)", ProductionCompanyIDs: []int{146598}, RequirePrefix: "WWE"},
+	// AEW = id 119828. Future AEW PPVs that aren't in the keyword list above
+	// (or whose TMDB titles drift) still get matched via this entry.
+	{Name: "AEW PPV (production company)", ProductionCompanyIDs: []int{119828}, RequirePrefix: "AEW"},
 }
 
 // Builtin returns a copy of the default registry.
@@ -167,9 +200,9 @@ func Lookup(extra []Movie, imdbID string, tmdbID int, tmdbTitle, originalTitle s
 
 // DeriveSceneTitles returns the scene-title variants for the given TMDB title.
 // Explicit SceneTitles on the movie take precedence; otherwise the TMDB title
-// is used as the base. When RequireWWEPrefix is set, a "WWE "-prefixed variant
+// is used as the base. When RequirePrefix is set, a prefix-prepended variant
 // is added (and the un-prefixed variant retained as a fallback) so wrongly-named
-// releases without the WWE prefix still pass validation.
+// releases without the brand prefix still pass validation.
 func (m Movie) DeriveSceneTitles(tmdbTitle string) []string {
 	tmdbTitle = strings.TrimSpace(tmdbTitle)
 	var base []string
@@ -182,33 +215,35 @@ func (m Movie) DeriveSceneTitles(tmdbTitle string) []string {
 	} else if tmdbTitle != "" {
 		base = append(base, tmdbTitle)
 	}
-	if !m.RequireWWEPrefix {
+	prefix := strings.TrimSpace(m.RequirePrefix)
+	if prefix == "" {
 		return uniqueLowerOrdered(base)
 	}
 	out := make([]string, 0, len(base)*2)
 	for _, t := range base {
-		if hasWWEPrefix(t) {
+		if hasPrefix(t, prefix) {
 			out = append(out, t)
-			if rest := strings.TrimSpace(t[len("WWE"):]); rest != "" {
+			if rest := strings.TrimSpace(t[len(prefix):]); rest != "" {
 				out = append(out, rest)
 			}
 		} else {
-			out = append(out, "WWE "+t)
+			out = append(out, prefix+" "+t)
 			out = append(out, t)
 		}
 	}
 	return uniqueLowerOrdered(out)
 }
 
-func hasWWEPrefix(s string) bool {
-	if len(s) < 4 {
+// hasPrefix reports whether s starts with prefix followed by a separator
+// character. The separator check prevents "WWES..." from matching prefix "WWE".
+func hasPrefix(s, prefix string) bool {
+	if len(s) < len(prefix)+1 {
 		return false
 	}
-	if !strings.EqualFold(s[:3], "WWE") {
+	if !strings.EqualFold(s[:len(prefix)], prefix) {
 		return false
 	}
-	// require a separator after the prefix so "WWES..." isn't matched.
-	switch s[3] {
+	switch s[len(prefix)] {
 	case ' ', '.', '-', '_', ':':
 		return true
 	}
