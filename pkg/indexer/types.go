@@ -46,7 +46,11 @@ type SearchRequest struct {
 	DateBased         bool
 	EpisodeAirDate    string
 	DateToleranceDays int
-	SearchMode        string
+	// EventBased marks an event-organised movie (e.g. WWE PLEs): the movie
+	// title gate is replaced by token-subset matching against EventSceneTitles.
+	EventBased       bool
+	EventSceneTitles []string
+	SearchMode       string
 	DisableResultFiltering  bool
 	EnableYearValidation    bool
 	IndexerMode             string

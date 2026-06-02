@@ -11,6 +11,7 @@ import (
 	"streamnzb/pkg/core/config"
 	"streamnzb/pkg/core/logger"
 	"streamnzb/pkg/datebased"
+	"streamnzb/pkg/eventbased"
 	"streamnzb/pkg/indexer"
 	"streamnzb/pkg/release"
 	"streamnzb/pkg/search"
@@ -47,6 +48,12 @@ type resolvedSearchMetadata struct {
 	SeriesTitleOverrides []string // scene titles, most-specific first
 	EpisodeAirDate       string   // "YYYY-MM-DD" resolved from TMDB
 	DateToleranceDays    int
+
+	// EventBased and the fields below are populated for event-organised movies
+	// (e.g. WWE PLEs): the movie is searched + validated by scene-title token
+	// subset, not by the default fuzzy TMDB-title match.
+	EventBased       bool
+	EventSceneTitles []string // scene titles, most-specific first
 }
 
 func metadataDisplayTitle(metadata *resolvedSearchMetadata, contentType string) string {
@@ -373,6 +380,12 @@ func metadataOriginalLanguage(metadata *resolvedSearchMetadata, contentType stri
 func buildMovieSearchQueryFromMetadata(metadata *resolvedSearchMetadata, language string, includeYear bool) string {
 	if metadata == nil || metadata.MovieDetails == nil {
 		return ""
+	}
+	// Event-organised movies override the TMDB title with the first scene title
+	// (e.g. "WWE WrestleMania 41"). When the caller still wants a primary query
+	// (e.g. for logging), return that override.
+	if metadata.EventBased && len(metadata.EventSceneTitles) > 0 {
+		return strings.TrimSpace(metadata.EventSceneTitles[0])
 	}
 	title := strings.TrimSpace(metadata.MovieDetails.Title)
 	if useOriginalTitleLanguage(language) {
@@ -759,6 +772,17 @@ func validationQueryProfilesFromMetadata(metadata *resolvedSearchMetadata, conte
 		}
 		return profiles
 	}
+	// Event-organised movies validate via token-subset matching against the
+	// scene-title queries; the standard title-fuzzy gate is bypassed in the
+	// validator itself when an EventMatch is supplied.
+	if contentType == "movie" && metadata != nil && metadata.EventBased {
+		eventQueries := buildMovieEventValidationQueriesFromMetadata(metadata)
+		profiles := make([]indexer.ValidationQueryProfile, 0, len(eventQueries))
+		for _, query := range eventQueries {
+			profiles = append(profiles, indexer.ValidationQueryProfile{Query: query})
+		}
+		return profiles
+	}
 	grouped := make(map[string]*indexer.ValidationQueryProfile, len(languages))
 	order := make([]string, 0, len(languages))
 	for _, language := range languages {
@@ -825,6 +849,9 @@ func buildMovieQueriesFromMetadata(metadata *resolvedSearchMetadata, language st
 	if metadata == nil || metadata.MovieDetails == nil {
 		return nil
 	}
+	if metadata.EventBased {
+		return buildMovieEventQueriesFromMetadata(metadata)
+	}
 	primary := strings.TrimSpace(release.NormalizeTitleForSearchQuery(buildMovieSearchQueryFromMetadata(metadata, language, false)))
 	if primary == "" {
 		return nil
@@ -833,6 +860,44 @@ func buildMovieQueriesFromMetadata(metadata *resolvedSearchMetadata, language st
 		primary = appendYearQuery(primary, movieYearFromMetadata(metadata))
 	}
 	return appendUniqueSearchQuery(nil, primary)
+}
+
+// buildMovieEventQueriesFromMetadata emits one search query per scene title for
+// an event-organised movie (e.g. WWE PLE). Validation accepts releases whose
+// title contains every token of any scene title, so we don't need to also emit
+// year-suffix permutations - the year-suffix variants are already in the scene
+// title list when needed.
+func buildMovieEventQueriesFromMetadata(metadata *resolvedSearchMetadata) []string {
+	if metadata == nil || !metadata.EventBased {
+		return nil
+	}
+	var queries []string
+	for _, sceneTitle := range metadata.EventSceneTitles {
+		normalized := strings.TrimSpace(release.NormalizeTitleForSearchQuery(sceneTitle))
+		if normalized == "" {
+			continue
+		}
+		queries = appendUniqueSearchQuery(queries, normalized)
+	}
+	return queries
+}
+
+// buildMovieEventValidationQueriesFromMetadata returns one validation query per
+// scene title (no year suffix) so a release passing the token-subset matcher is
+// accepted regardless of language permutations.
+func buildMovieEventValidationQueriesFromMetadata(metadata *resolvedSearchMetadata) []string {
+	if metadata == nil || !metadata.EventBased {
+		return nil
+	}
+	queries := make([]string, 0, len(metadata.EventSceneTitles))
+	for _, sceneTitle := range metadata.EventSceneTitles {
+		normalized := strings.TrimSpace(release.NormalizeTitleForSearchQuery(sceneTitle))
+		if normalized == "" {
+			continue
+		}
+		queries = appendUniqueSearchQuery(queries, normalized)
+	}
+	return queries
 }
 
 func buildSeriesQueriesFromMetadata(metadata *resolvedSearchMetadata, language string, includeYear bool, season, episode, scope string) []string {
@@ -1547,6 +1612,36 @@ func (s *Server) buildSearchParamsBase(contentType, id string, searchQuery *conf
 			}
 		}
 	}
+	if contentType == "movie" && params.Metadata != nil && params.Metadata.MovieDetails != nil {
+		tmdbNum, _ := strconv.Atoi(req.TMDBID)
+		movieTitle := strings.TrimSpace(params.Metadata.MovieDetails.Title)
+		movieOriginal := strings.TrimSpace(params.Metadata.MovieDetails.OriginalTitle)
+		if movie, ok := eventbased.Lookup(s.config.EventBasedMovies, req.IMDbID, tmdbNum, movieTitle, movieOriginal); ok {
+			sceneTitles := movie.DeriveSceneTitles(movieTitle)
+			// Also include a year-suffixed variant for each derived scene title so
+			// PLE releases that carry only the year (no edition number) still match.
+			year := movieYearFromMetadata(params.Metadata)
+			if year != "" {
+				withYear := make([]string, 0, len(sceneTitles)*2)
+				for _, t := range sceneTitles {
+					withYear = append(withYear, t)
+					if !strings.HasSuffix(strings.TrimSpace(t), year) {
+						withYear = append(withYear, strings.TrimSpace(t)+" "+year)
+					}
+				}
+				sceneTitles = withYear
+			}
+			params.Metadata.EventBased = true
+			params.Metadata.EventSceneTitles = sceneTitles
+			logMetadataResolutionState(contentType, id, "event_based_movie",
+				"tmdb_id", req.TMDBID,
+				"imdb_id", req.IMDbID,
+				"movie", movie.Name,
+				"tmdb_title", movieTitle,
+				"scene_titles", sceneTitles,
+			)
+		}
+	}
 	contentIDs.ImdbID = req.IMDbID
 	contentIDs.TmdbID = req.TMDBID
 	contentIDs.TvdbID = req.TVDBID
@@ -1616,6 +1711,16 @@ func (s *Server) buildSearchParamsFromBase(base *SearchParams, searchQuery *conf
 		req.DateBased = true
 		req.EpisodeAirDate = params.Metadata.EpisodeAirDate
 		req.DateToleranceDays = params.Metadata.DateToleranceDays
+	}
+	if contentType == "movie" && params.Metadata != nil && params.Metadata.EventBased {
+		// Force text search: event-organised movies use scene-title token-subset
+		// validation, which can't be expressed through newznab id-search params.
+		// Year validation is disabled because scene-title queries don't carry the
+		// year as a trailing token; the year tolerance lives in the token matcher.
+		searchMode = "text"
+		includeYear = false
+		req.EventBased = true
+		req.EventSceneTitles = append([]string(nil), params.Metadata.EventSceneTitles...)
 	}
 	req.SeriesSearchScope = scope
 	req.EnableYearValidation = includeYear

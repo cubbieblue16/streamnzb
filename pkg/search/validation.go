@@ -26,6 +26,52 @@ type DateMatch struct {
 	ToleranceDays int
 }
 
+// EventMatch configures token-subset based result matching for event-organised
+// movies (e.g. WWE PLEs). When supplied to validation, the movie title gate is
+// replaced by: every token of at least one SceneTitles entry must appear in the
+// full release title (case-insensitive, any order, no contiguity).
+//
+// Matching against the full release title (rather than the parsed-out title)
+// lets year/edition tokens like "2024" survive past the parser's title/year
+// split, so a scene title like "WWE WrestleMania 2024" can match a release
+// named "WWE.WrestleMania.40.Night.1.2024.1080p.WEB-HEEL" - which the default
+// fuzzy contiguous-block match would otherwise drop on the leading "WWE" and
+// trailing "Night 1" tokens.
+type EventMatch struct {
+	SceneTitles []string
+}
+
+func releaseMatchesAnyEventSceneTitle(releaseTitle string, eventMatch *EventMatch) bool {
+	if eventMatch == nil || len(eventMatch.SceneTitles) == 0 {
+		return false
+	}
+	gotWords := release.NormalizeTitleWordsForMatch(releaseTitle)
+	if len(gotWords) == 0 {
+		return false
+	}
+	gotSet := make(map[string]bool, len(gotWords))
+	for _, w := range gotWords {
+		gotSet[w] = true
+	}
+	for _, sceneTitle := range eventMatch.SceneTitles {
+		expectWords := release.NormalizeTitleWordsForMatch(sceneTitle)
+		if len(expectWords) == 0 {
+			continue
+		}
+		ok := true
+		for _, w := range expectWords {
+			if !gotSet[w] {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
+}
+
 func extractReleaseDate(title string) (time.Time, bool) {
 	m := releaseDateRE.FindStringSubmatch(title)
 	if len(m) != 4 {
@@ -341,13 +387,27 @@ func ValidateSearchResultsWithStats(releases []*release.Release, contentType, va
 }
 
 func ValidateSearchResultsWithStatsForQueries(releases []*release.Release, contentType string, validationQueries []string, season, episode string, enableTitleValidation, enableYearValidation bool) ([]*release.Release, ValidationStats) {
-	return ValidateSearchResultsWithDateMatch(releases, contentType, validationQueries, season, episode, enableTitleValidation, enableYearValidation, nil)
+	return ValidateSearchResultsWithMatchers(releases, contentType, validationQueries, season, episode, enableTitleValidation, enableYearValidation, nil, nil)
 }
 
 // ValidateSearchResultsWithDateMatch is ValidateSearchResultsWithStatsForQueries
 // with optional air-date matching for date-organised shows. When dateMatch is
 // nil, behaviour is identical to the standard SxxExx validation.
 func ValidateSearchResultsWithDateMatch(releases []*release.Release, contentType string, validationQueries []string, season, episode string, enableTitleValidation, enableYearValidation bool, dateMatch *DateMatch) ([]*release.Release, ValidationStats) {
+	return ValidateSearchResultsWithMatchers(releases, contentType, validationQueries, season, episode, enableTitleValidation, enableYearValidation, dateMatch, nil)
+}
+
+// ValidateSearchResultsWithMatchers is the unified validation entry point.
+//
+//   - dateMatch (series): accept when the release's parsed date is within
+//     tolerance of the expected air date, replacing the SxxExx gate.
+//   - eventMatch (movies): accept when the release's full title contains every
+//     token of at least one scene title, replacing the fuzzy contiguous-block
+//     title gate.
+//
+// Both nil = standard SxxExx + fuzzy-title behaviour. The two matchers are
+// independent and may be set together (rare in practice).
+func ValidateSearchResultsWithMatchers(releases []*release.Release, contentType string, validationQueries []string, season, episode string, enableTitleValidation, enableYearValidation bool, dateMatch *DateMatch, eventMatch *EventMatch) ([]*release.Release, ValidationStats) {
 	stats := ValidationStats{}
 	if contentType != "movie" && contentType != "series" {
 		stats.RawResults = len(releases)
@@ -383,7 +443,16 @@ func ValidateSearchResultsWithDateMatch(releases []*release.Release, contentType
 		}
 
 		if contentType == "movie" {
-			if stats.TitleValidationApplied && !titleMatchesAnyExpectation(expectations, parsed.Title) {
+			if eventMatch != nil {
+				if !releaseMatchesAnyEventSceneTitle(rel.Title, eventMatch) {
+					stats.DroppedTitle++
+					logger.Trace("ValidateSearchResults dropped: event_title",
+						"scene_titles", eventMatch.SceneTitles,
+						"release", rel.Title,
+					)
+					continue
+				}
+			} else if stats.TitleValidationApplied && !titleMatchesAnyExpectation(expectations, parsed.Title) {
 				stats.DroppedTitle++
 				logger.Trace("ValidateSearchResults dropped: title",
 					"expect_title", stats.ExpectedTitle,

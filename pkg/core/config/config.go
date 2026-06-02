@@ -18,6 +18,7 @@ import (
 	"streamnzb/pkg/core/logger"
 	"streamnzb/pkg/core/paths"
 	"streamnzb/pkg/datebased"
+	"streamnzb/pkg/eventbased"
 )
 
 const (
@@ -408,6 +409,11 @@ type Config struct {
 	// DateBasedShows registers extra date-organised shows (searched by air date
 	// instead of SxxExx) on top of the built-in WWE defaults. See pkg/datebased.
 	DateBasedShows []datebased.Show `json:"date_based_shows,omitempty"`
+
+	// EventBasedMovies registers extra event-organised movies (searched by
+	// scene-title token subset instead of fuzzy title match) on top of the
+	// built-in WWE PLE defaults. See pkg/eventbased.
+	EventBasedMovies []eventbased.Movie `json:"event_based_movies,omitempty"`
 
 	// MemoryLimitMB sets a soft limit on total Go heap (runtime/debug.SetMemoryLimit). 0 = no limit.
 	// When set, segment cache is automatically 80% of this limit.
