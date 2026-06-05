@@ -19,7 +19,7 @@ func TestLookupMatchesWWEByName(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			show, ok := Lookup(nil, "", 0, tc.tmdbName, "", nil)
+			show, ok := Lookup(nil, "", 0, tc.tmdbName, "", nil, "", nil)
 			if !ok {
 				t.Fatalf("expected %q to match a date-based show", tc.tmdbName)
 			}
@@ -40,14 +40,14 @@ func TestLookupMatchesWWEByName(t *testing.T) {
 func TestLookupMatchesRawByPinnedID(t *testing.T) {
 	// Real TMDB data: WWE Raw is id 4656 with the bare name "Raw" (imdb tt0185103).
 	// Keyword match ("wwe"+"raw") fails on "Raw" alone; the pinned id must catch it.
-	if show, ok := Lookup(nil, "", 4656, "Raw", "Raw", nil); !ok || show.Name != "WWE Raw" {
+	if show, ok := Lookup(nil, "", 4656, "Raw", "Raw", nil, "", nil); !ok || show.Name != "WWE Raw" {
 		t.Fatalf("expected TMDB id 4656 to match WWE Raw, got ok=%v show=%+v", ok, show)
 	}
-	if show, ok := Lookup(nil, "tt0185103", 0, "Raw", "Raw", nil); !ok || show.Name != "WWE Raw" {
+	if show, ok := Lookup(nil, "tt0185103", 0, "Raw", "Raw", nil, "", nil); !ok || show.Name != "WWE Raw" {
 		t.Fatalf("expected imdb tt0185103 to match WWE Raw, got ok=%v show=%+v", ok, show)
 	}
 	// Name-only "Raw" with no id must NOT match (avoids false positives like the film "Raw").
-	if _, ok := Lookup(nil, "", 0, "Raw", "Raw", nil); ok {
+	if _, ok := Lookup(nil, "", 0, "Raw", "Raw", nil, "", nil); ok {
 		t.Fatalf("bare name 'Raw' with no id should not match")
 	}
 }
@@ -68,7 +68,7 @@ func TestLookupMatchesAEWByPinnedID(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			show, ok := Lookup(nil, tc.imdbID, tc.tmdbID, tc.tmdbName, "", nil)
+			show, ok := Lookup(nil, tc.imdbID, tc.tmdbID, tc.tmdbName, "", nil, "", nil)
 			if !ok {
 				t.Fatalf("expected match")
 			}
@@ -87,7 +87,7 @@ func TestLookupMatchesAEWByPinnedID(t *testing.T) {
 // produced by AEW (company 119828) must be picked up and have its scene title
 // derived correctly. "Battle of the Belts" → 4 tokens → unprefixed kept.
 func TestLookupMatchesByAEWProductionCompany(t *testing.T) {
-	show, ok := Lookup(nil, "", 999999, "All Elite Wrestling: Battle of the Belts", "", []int{119828})
+	show, ok := Lookup(nil, "", 999999, "All Elite Wrestling: Battle of the Belts", "", []int{119828}, "", nil)
 	if !ok {
 		t.Fatalf("expected AEW production-company match")
 	}
@@ -105,7 +105,7 @@ func TestLookupMatchesByAEWProductionCompany(t *testing.T) {
 // (company 146598) even when name/id aren't in the registry. Multi-token →
 // un-prefixed fallback retained.
 func TestLookupMatchesByWWEProductionCompany(t *testing.T) {
-	show, ok := Lookup(nil, "", 999998, "Some New WWE Show", "", []int{146598})
+	show, ok := Lookup(nil, "", 999998, "Some New WWE Show", "", []int{146598}, "", nil)
 	if !ok {
 		t.Fatalf("expected WWE production-company match")
 	}
@@ -119,11 +119,38 @@ func TestLookupMatchesByWWEProductionCompany(t *testing.T) {
 	}
 }
 
+// A WWE-produced documentary/miniseries (e.g. "Hulk Hogan: Real American",
+// tmdb 318880, shares company 146598 with WWE Raw) is SxxExx-numbered, not
+// air-date-numbered. The production-company catch-all must NOT swallow it into
+// date-based scope, which would force air-date-only queries and return zero
+// results for episode-numbered releases. The narrow gate keys on TMDB
+// type/genre to distinguish weekly programming from docs/miniseries.
+func TestLookupExcludesWWEDocumentaryFromCatchAll(t *testing.T) {
+	// type "Miniseries" alone excludes it.
+	if _, ok := Lookup(nil, "", 318880, "Hulk Hogan: Real American", "", []int{146598}, "Miniseries", nil); ok {
+		t.Fatalf("WWE-produced Miniseries should NOT be classified date-based via catch-all")
+	}
+	// genre "Documentary" alone excludes it.
+	if _, ok := Lookup(nil, "", 318881, "Some WWE Doc", "", []int{146598}, "", []string{"Documentary"}); ok {
+		t.Fatalf("WWE-produced Documentary should NOT be classified date-based via catch-all")
+	}
+	// Control: a normal WWE-produced show (Scripted/Reality) still matches the
+	// catch-all, so the gate doesn't over-reach and break weekly programming.
+	if show, ok := Lookup(nil, "", 999997, "Some New WWE Show", "", []int{146598}, "Reality", []string{"Reality"}); !ok || show.Name != "WWE (production company)" {
+		t.Fatalf("non-doc WWE show should still match catch-all, got ok=%v show=%+v", ok, show)
+	}
+	// Explicit pinned entries must still win even when flagged as a doc — the
+	// gate only guards the company catch-all, never the explicit registry.
+	if show, ok := Lookup(nil, "", 4656, "Raw", "", []int{146598, 13651}, "Documentary", []string{"Documentary"}); !ok || show.Name != "WWE Raw" {
+		t.Fatalf("explicit WWE Raw must win regardless of type/genre, got ok=%v show=%+v", ok, show)
+	}
+}
+
 // Explicit pinned entries should win over the production-company catch-all.
 func TestLookupExplicitWinsOverProductionCompany(t *testing.T) {
 	// WWE Raw (TMDB 4656) is also produced by WWE (146598). Explicit entry
 	// "WWE Raw" should match, not the catch-all.
-	show, ok := Lookup(nil, "", 4656, "Raw", "", []int{146598, 13651})
+	show, ok := Lookup(nil, "", 4656, "Raw", "", []int{146598, 13651}, "", nil)
 	if !ok {
 		t.Fatalf("expected match")
 	}
@@ -133,10 +160,10 @@ func TestLookupExplicitWinsOverProductionCompany(t *testing.T) {
 }
 
 func TestLookupRejectsNonDateBased(t *testing.T) {
-	if _, ok := Lookup(nil, "tt0903747", 1396, "Breaking Bad", "", nil); ok {
+	if _, ok := Lookup(nil, "tt0903747", 1396, "Breaking Bad", "", nil, "", nil); ok {
 		t.Fatalf("Breaking Bad should not match a date-based show")
 	}
-	if _, ok := Lookup(nil, "", 0, "RuPaul's Drag Race", "", nil); ok {
+	if _, ok := Lookup(nil, "", 0, "RuPaul's Drag Race", "", nil, "", nil); ok {
 		t.Fatalf("a non-WWE 'Raw'-less show should not match")
 	}
 }
@@ -148,17 +175,17 @@ func TestLookupMatchesByID(t *testing.T) {
 		IMDbIDs:     []string{"tt1234567"},
 		SceneTitles: []string{"Custom Daily Show"},
 	}}
-	if show, ok := Lookup(extra, "", 99999, "Anything", "", nil); !ok || show.Name != "Custom Daily" {
+	if show, ok := Lookup(extra, "", 99999, "Anything", "", nil, "", nil); !ok || show.Name != "Custom Daily" {
 		t.Fatalf("expected TMDB id match, got ok=%v show=%+v", ok, show)
 	}
-	if show, ok := Lookup(extra, "TT1234567", 0, "Anything", "", nil); !ok || show.Name != "Custom Daily" {
+	if show, ok := Lookup(extra, "TT1234567", 0, "Anything", "", nil, "", nil); !ok || show.Name != "Custom Daily" {
 		t.Fatalf("expected case-insensitive IMDb id match, got ok=%v show=%+v", ok, show)
 	}
 }
 
 // Empty production company set must not match the catch-all entries.
 func TestLookupEmptyProductionCompanyDoesNotMatchCatchAll(t *testing.T) {
-	if _, ok := Lookup(nil, "", 0, "Some Random Show", "", nil); ok {
+	if _, ok := Lookup(nil, "", 0, "Some Random Show", "", nil, "", nil); ok {
 		t.Fatalf("empty prod-company set should not trigger catch-all match")
 	}
 }

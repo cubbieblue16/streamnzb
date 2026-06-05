@@ -663,6 +663,10 @@ func analyzeFile(file *File) *FileInfo {
 	ext := strings.ToLower(filepath.Ext(filename))
 
 	parsed := ptt.Parse(filename)
+	// Same go-ptt bare-domain "site" handler that blanks search titles also
+	// corrupts in-NZB filenames; repair via the shared logic so both parse
+	// paths agree. See parser.ReclaimTitle.
+	parsed.Title = searchparser.ReclaimTitle(filename, parsed.Title, parsed.Site)
 
 	info := &FileInfo{
 		File:       file,

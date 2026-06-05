@@ -274,8 +274,19 @@ type TVDetails struct {
 	OriginalLanguage    string              `json:"original_language"`
 	FirstAirDate        string              `json:"first_air_date"`
 	NumberOfSeasons     int                 `json:"number_of_seasons"`
+	// Type is TMDB's series type ("Scripted", "Reality", "Documentary",
+	// "Miniseries", ...). Genres carries the genre names. Both are used to keep
+	// the WWE/AEW production-company date-based catch-all from misfiring on
+	// documentaries/miniseries (which are episode-numbered, not date-organised).
+	Type                string              `json:"type"`
+	Genres              []Genre             `json:"genres"`
 	Seasons             []TVSeasonInfo      `json:"seasons"`
 	ProductionCompanies []ProductionCompany `json:"production_companies"`
+}
+
+type Genre struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
 }
 
 type TVSeasonInfo struct {

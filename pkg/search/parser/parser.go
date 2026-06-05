@@ -12,6 +12,12 @@ import (
 
 var dashedSeasonEpisodePattern = regexp.MustCompile(`(?i)\bS(?:eason)?\s*0*([0-9]{1,2})\s*-\s*0*([0-9]{1,3})(?:$|[\s._()[\]])`)
 
+// firstMetadataTokenPattern locates the first unambiguous release-metadata token
+// (season/episode marker, 4-digit year, resolution, or video codec). None of
+// these occur inside real show/movie titles, so the text preceding the first
+// match is the title. Used only to reconstruct a title that go-ptt blanked out.
+var firstMetadataTokenPattern = regexp.MustCompile(`(?i)\b(?:s[0-9]{1,2}(?:e[0-9]{1,3})?|[0-9]{1,2}x[0-9]{1,3}|(?:19|20)[0-9]{2}|(?:480|540|576|720|1080|1440|2160|4320)[pi]|x26[45]|h\.?26[45]|hevc|xvid|av1)\b`)
+
 type ParsedRelease struct {
 	Title      string
 	Year       int
@@ -122,7 +128,75 @@ func ParseReleaseTitle(title string) *ParsedRelease {
 	}
 	applyDashedSeasonEpisodeFallback(title, parsed)
 
+	// Repair titles corrupted by go-ptt's bare-domain "site" handler (see
+	// ReclaimTitle). Applied here so every ParseReleaseTitle caller is covered.
+	parsed.Title = ReclaimTitle(title, parsed.Title, parsed.Site)
+
 	return parsed
+}
+
+// ReclaimTitle repairs titles that go-ptt's bare-domain "site" handler corrupts.
+// That handler treats any dotted token whose tail is a TLD keyword
+// (party, vip, pics, tv, co, nu, ms, mx, com, org, net) as a release-site domain
+// and strips it from the title — so "Word.Party.S01E02" loses its whole title and
+// "The.Block.Party.Show.S01E01" loses the middle, leaving "The Show". streamnzb
+// never reads the Site field, so this stripping is pure damage.
+//
+// The corruption signature is unambiguous: go-ptt populated Site with a *bare*
+// domain (no "www"/"http" prefix — those are real site tags) whose text lies in
+// the title region (before the first release-metadata token). When that holds, the
+// real title is the raw name's leading segment, reconstructed by deriveFallbackTitle.
+// Otherwise pttTitle is returned untouched, so every name go-ptt parses correctly —
+// including genuine www/bracketed site tags like "www.1TamilMV.world" or "[eztv.re]"
+// — is preserved.
+func ReclaimTitle(raw, pttTitle, pttSite string) string {
+	if !titleCorruptedBySite(raw, pttTitle, pttSite) {
+		return pttTitle
+	}
+	if reclaimed := deriveFallbackTitle(raw); reclaimed != "" {
+		return reclaimed
+	}
+	return pttTitle
+}
+
+func titleCorruptedBySite(raw, pttTitle, pttSite string) bool {
+	// Whole title swallowed (e.g. "Word.Party.S01E02" -> "").
+	if strings.TrimSpace(pttTitle) == "" {
+		return true
+	}
+	site := strings.ToLower(strings.TrimSpace(pttSite))
+	if site == "" || strings.HasPrefix(site, "www") || strings.HasPrefix(site, "http") {
+		return false
+	}
+	// A bare site value that overlaps the title region means a real title word
+	// was misread as a domain (partial corruption, e.g. "Greek.Co" inside
+	// "My.Big.Fat.Greek.Co.S01E01"). Trailing site tags (e.g. "[eztv.re]") fall
+	// after the first metadata token and are excluded.
+	region := raw
+	if loc := firstMetadataTokenPattern.FindStringIndex(raw); loc != nil {
+		region = raw[:loc[0]]
+	}
+	return strings.Contains(strings.ToLower(region), site)
+}
+
+// deriveFallbackTitle returns the leading portion of a raw release name up to
+// the first release-metadata token, with separators normalised to spaces. It is
+// a last-resort title source for names go-ptt fails to title.
+func deriveFallbackTitle(rawTitle string) string {
+	head := strings.TrimSpace(rawTitle)
+	if head == "" {
+		return ""
+	}
+	if loc := firstMetadataTokenPattern.FindStringIndex(head); loc != nil {
+		head = head[:loc[0]]
+	}
+	head = strings.Map(func(r rune) rune {
+		if r == '.' || r == '_' {
+			return ' '
+		}
+		return r
+	}, head)
+	return strings.Join(strings.Fields(head), " ")
 }
 
 func applyDashedSeasonEpisodeFallback(rawTitle string, parsed *ParsedRelease) {

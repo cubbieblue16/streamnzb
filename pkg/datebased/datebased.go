@@ -120,7 +120,13 @@ func Builtin() []Show {
 // (from config) are checked before the built-ins so operators can override.
 // Matching is by TMDB id, then IMDb id, then keyword match against the names,
 // then TMDB production-company id.
-func Lookup(extra []Show, imdbID string, tmdbID int, tmdbName, originalName string, productionCompanyIDs []int) (Show, bool) {
+//
+// showType/genres are TMDB's series type and genre names. They gate ONLY the
+// production-company catch-all: a documentary or miniseries produced by WWE/AEW
+// (e.g. "Hulk Hogan: Real American") is episode-numbered, not date-organised, so
+// it must not inherit the date-based override. Explicit id/keyword/config matches
+// are intentional and never gated by type.
+func Lookup(extra []Show, imdbID string, tmdbID int, tmdbName, originalName string, productionCompanyIDs []int, showType string, genres []string) (Show, bool) {
 	name := strings.ToLower(strings.TrimSpace(tmdbName) + " " + strings.TrimSpace(originalName))
 	imdb := strings.ToLower(strings.TrimSpace(imdbID))
 
@@ -174,6 +180,12 @@ func Lookup(extra []Show, imdbID string, tmdbID int, tmdbName, originalName stri
 			}
 		}
 		if len(show.ProductionCompanyIDs) > 0 && len(companySet) > 0 {
+			// The catch-all auto-detects *weekly* WWE/AEW programs. Documentaries
+			// and miniseries by the same companies are SxxExx-numbered, so skip
+			// them here (they fall through to the normal episode search).
+			if isNonWeeklyFormat(showType, genres) {
+				continue
+			}
 			for _, id := range show.ProductionCompanyIDs {
 				if _, ok := companySet[id]; ok {
 					return show, true
@@ -182,6 +194,25 @@ func Lookup(extra []Show, imdbID string, tmdbID int, tmdbName, originalName stri
 		}
 	}
 	return Show{}, false
+}
+
+// isNonWeeklyFormat reports whether the show's TMDB type/genres mark it as a
+// documentary or limited series rather than a recurring weekly program. Date-based
+// wrestling shows (Raw, SmackDown, Dynamite, ...) are type "Scripted"/"Reality";
+// WWE/AEW documentaries are type "Documentary"/"Miniseries" and/or genre
+// "Documentary". The check is a denylist so an empty/unknown type still counts as
+// weekly, preserving the catch-all's "future weekly shows just work" behaviour.
+func isNonWeeklyFormat(showType string, genres []string) bool {
+	switch strings.ToLower(strings.TrimSpace(showType)) {
+	case "documentary", "miniseries":
+		return true
+	}
+	for _, g := range genres {
+		if strings.EqualFold(strings.TrimSpace(g), "documentary") {
+			return true
+		}
+	}
+	return false
 }
 
 // DeriveSceneTitles returns the scene-title variants for the given TMDB name.

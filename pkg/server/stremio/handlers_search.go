@@ -1564,19 +1564,27 @@ func (s *Server) buildSearchParamsBase(contentType, id string, searchQuery *conf
 
 	if contentType == "series" && params.Metadata != nil {
 		tmdbNum, _ := strconv.Atoi(req.TMDBID)
-		var tvName, tvOriginal string
+		var tvName, tvOriginal, tvType string
 		var tvProductionCompanyIDs []int
+		var tvGenres []string
 		if params.Metadata.TVDetails != nil {
 			tvName = params.Metadata.TVDetails.Name
 			tvOriginal = params.Metadata.TVDetails.OriginalName
+			tvType = params.Metadata.TVDetails.Type
 			tvProductionCompanyIDs = make([]int, 0, len(params.Metadata.TVDetails.ProductionCompanies))
 			for _, pc := range params.Metadata.TVDetails.ProductionCompanies {
 				if pc.ID > 0 {
 					tvProductionCompanyIDs = append(tvProductionCompanyIDs, pc.ID)
 				}
 			}
+			tvGenres = make([]string, 0, len(params.Metadata.TVDetails.Genres))
+			for _, g := range params.Metadata.TVDetails.Genres {
+				if name := strings.TrimSpace(g.Name); name != "" {
+					tvGenres = append(tvGenres, name)
+				}
+			}
 		}
-		if show, ok := datebased.Lookup(s.config.DateBasedShows, req.IMDbID, tmdbNum, tvName, tvOriginal, tvProductionCompanyIDs); ok {
+		if show, ok := datebased.Lookup(s.config.DateBasedShows, req.IMDbID, tmdbNum, tvName, tvOriginal, tvProductionCompanyIDs, tvType, tvGenres); ok {
 			sceneTitles := show.DeriveSceneTitles(tvName)
 			if len(sceneTitles) > 0 {
 				params.Metadata.DateBased = true
