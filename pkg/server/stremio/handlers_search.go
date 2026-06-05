@@ -1042,6 +1042,9 @@ func newAvailContext(result *availnzb.ReleasesResult, inputResults int) *AvailCo
 		return ctx
 	}
 	for _, rws := range result.Releases {
+		// Availability is keyed solely on DetailsURL; a release without one can
+		// never be matched against indexer results, so it is invisible to
+		// enrichment and filtering. Indexers that omit DetailsURL get a free pass.
 		if rws == nil || rws.Release == nil || rws.Release.DetailsURL == "" {
 			continue
 		}
@@ -1053,6 +1056,9 @@ func newAvailContext(result *availnzb.ReleasesResult, inputResults int) *AvailCo
 		if !rws.Available {
 			ctx.UnavailableByDetailsURL[rws.Release.DetailsURL] = true
 		}
+		// A release reported Available but with an empty Link lands in neither
+		// map on purpose: "available" without a playable link is not actionable,
+		// so it is treated as unknown rather than good or bad.
 	}
 	return ctx
 }
@@ -1282,7 +1288,9 @@ func alignAvailContextWithSearch(availCtx *AvailContext, indexerReleases []*rele
 	if len(indexerDetailsURLs) == 0 {
 		return availCtx
 	}
-	filtered := availCtx.Result.Releases[:0]
+	// Build a new slice rather than compacting availCtx.Result.Releases in
+	// place, so the caller's AvailContext is not mutated as a side effect.
+	filtered := make([]*availnzb.ReleaseWithStatus, 0, len(availCtx.Result.Releases))
 	for _, rws := range availCtx.Result.Releases {
 		if rws == nil || rws.Release == nil {
 			continue

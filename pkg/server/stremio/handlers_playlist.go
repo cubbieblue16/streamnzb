@@ -768,6 +768,13 @@ func (s *Server) applyPlaylistFiltering(candidates []triage.Candidate, source *p
 		return candidates
 	}
 	inputResults := len(candidates)
+	// Two-tier dead-NZB filtering, intentionally gated differently:
+	//   - filterCandidates above drops ALL releases AvailNZB marked unavailable,
+	//     but only when AvailNZBFilterReportedBad is enabled (the aggressive tier).
+	//   - filterCachedUnhealthyCandidates always runs when filtering is active and
+	//     drops only releases dead on every backbone THIS user can reach (the
+	//     conservative, false-positive-resistant baseline). Both tiers act solely
+	//     on releases the API reported as unavailable.
 	candidates = s.filterCachedUnhealthyCandidates(candidates, source.Avail, filteringActive, stream)
 	logStreamFiltering(stream, filterMode, inputResults, len(candidates))
 	return candidates
@@ -825,7 +832,9 @@ func (s *Server) filterCachedUnhealthyCandidates(merged []triage.Candidate, avai
 	if len(cachedUnhealthyForUs) == 0 {
 		return merged
 	}
-	filtered := merged[:0]
+	// Allocate a fresh slice instead of compacting merged in place, matching
+	// filterCandidates: callers may retain the input list for metrics.
+	filtered := make([]triage.Candidate, 0, len(merged))
 	for _, c := range merged {
 		if c.Release == nil || !cachedUnhealthyForUs[c.Release.DetailsURL] {
 			filtered = append(filtered, c)

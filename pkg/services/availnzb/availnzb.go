@@ -61,15 +61,6 @@ type BackboneStatus struct {
 
 type ProviderStatus = BackboneStatus
 
-type StatusResponse struct {
-	URL          string                    `json:"url"`
-	Available    bool                      `json:"available"`
-	ReleaseName  string                    `json:"release_name,omitempty"`
-	DownloadLink string                    `json:"download_link,omitempty"`
-	Size         int64                     `json:"size,omitempty"`
-	Summary      map[string]BackboneStatus `json:"summary"`
-}
-
 type MeResponse struct {
 	ID                     string     `json:"id"`
 	Name                   string     `json:"name"`
@@ -837,71 +828,6 @@ func (c *Client) GetMe() (*MeResponse, error) {
 	return &me, nil
 }
 
-func (c *Client) GetStatus(releaseURL string) (*StatusResponse, error) {
-	if c.BaseURL == "" {
-		logger.Trace("AvailNZB GetStatus skipped", "reason", "no base URL")
-		return nil, nil
-	}
-	apiKey := c.GetAPIKey()
-
-	params := url.Values{}
-	params.Set("url", releaseURL)
-	reqURL := c.BaseURL + apiPath + "/status/url?" + params.Encode()
-
-	logger.Debug("AvailNZB GetStatus", "url", releaseURL)
-
-	req, err := http.NewRequest("GET", reqURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	if apiKey != "" {
-		req.Header.Set("X-API-Key", apiKey)
-	}
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		logger.Error("AvailNZB GetStatus request failed", "err", err, "url", releaseURL)
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound {
-		logger.Debug("AvailNZB GetStatus", "result", "not_found", "url", releaseURL)
-		return nil, nil
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			logger.Error("AvailNZB GetStatus unexpected status and failed to read error body", "status", resp.StatusCode, "url", releaseURL, "err", readErr)
-			return nil, fmt.Errorf("availnzb status: unexpected status code: %d", resp.StatusCode)
-		}
-		message := decodeAPIErrorMessage(body)
-		if resp.StatusCode == http.StatusUnauthorized && isAPIKeyMissingMessage(message) {
-			logger.Error("AvailNZB GetStatus unexpected status", "status", resp.StatusCode, "url", releaseURL, "api_key_missing", true)
-			return nil, fmt.Errorf("availnzb status: unexpected status code: %d: api key missing", resp.StatusCode)
-		}
-		if resp.StatusCode == http.StatusForbidden && isAPIKeyTemporarilyAssignedMessage(message) {
-			logger.Warn("AvailNZB GetStatus blocked by temporary IP lease", "status", resp.StatusCode, "url", releaseURL, "reason", message)
-			return nil, fmt.Errorf("availnzb status: unexpected status code: %d: api key temporarily assigned to another ip", resp.StatusCode)
-		}
-		if message != "" {
-			logger.Error("AvailNZB GetStatus unexpected status", "status", resp.StatusCode, "url", releaseURL, "message", message)
-			return nil, fmt.Errorf("availnzb status: unexpected status code: %d: %s", resp.StatusCode, message)
-		}
-		logger.Error("AvailNZB GetStatus unexpected status", "status", resp.StatusCode, "url", releaseURL)
-		return nil, fmt.Errorf("availnzb status: unexpected status code: %d", resp.StatusCode)
-	}
-
-	var status StatusResponse
-	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
-		logger.Error("AvailNZB GetStatus decode failed", "err", err)
-		return nil, err
-	}
-
-	logger.Debug("AvailNZB GetStatus", "url", releaseURL, "available", status.Available, "backbones", len(status.Summary))
-	return &status, nil
-}
-
 type releasesResponseJSON struct {
 	ImdbID   string            `json:"imdb_id,omitempty"`
 	Count    int               `json:"count"`
@@ -1062,83 +988,4 @@ func (c *Client) OurBackbones(providerHosts []string) (map[string]bool, error) {
 		}
 	}
 	return out, nil
-}
-
-func (c *Client) CheckPreDownload(releaseURL string, validProviderHosts []string) (available bool, lastUpdated time.Time, capableProvider string, err error) {
-	logger.Debug("AvailNZB CheckPreDownload", "url", releaseURL, "our_providers", len(validProviderHosts))
-	if c.BaseURL == "" || releaseURL == "" {
-		logger.Trace("AvailNZB CheckPreDownload skipped", "reason", "no base URL or empty release URL")
-		return false, time.Time{}, "", nil
-	}
-
-	status, err := c.GetStatus(releaseURL)
-	if err != nil {
-		logger.Debug("AvailNZB CheckPreDownload GetStatus failed", "url", releaseURL, "err", err)
-		return false, time.Time{}, "", err
-	}
-	if status == nil {
-		logger.Debug("AvailNZB CheckPreDownload", "result", "not_found", "url", releaseURL)
-		return false, time.Time{}, "", nil
-	}
-
-	hostToBackbone, err := c.GetBackbones()
-	if err != nil || len(hostToBackbone) == 0 {
-		logger.Trace("AvailNZB CheckPreDownload", "result", "no_backbone_mapping", "err", err)
-		if status.Available && len(status.Summary) > 0 {
-			for _, report := range status.Summary {
-				if report.LastUpdated.After(lastUpdated) {
-					lastUpdated = report.LastUpdated
-				}
-			}
-			return true, lastUpdated, "", nil
-		}
-		return false, time.Time{}, "", nil
-	}
-	ourBackbones := make(map[string]bool)
-	for _, h := range validProviderHosts {
-		if b := hostToBackbone[strings.ToLower(strings.TrimSpace(h))]; b != "" {
-			ourBackbones[b] = true
-		}
-	}
-	if len(ourBackbones) == 0 {
-		if status.Available && len(status.Summary) > 0 {
-			for _, report := range status.Summary {
-				if report.LastUpdated.After(lastUpdated) {
-					lastUpdated = report.LastUpdated
-				}
-			}
-			return true, lastUpdated, "", nil
-		}
-		return false, time.Time{}, "", nil
-	}
-
-	for backbone, report := range status.Summary {
-		if ourBackbones[backbone] && report.Healthy {
-			if report.LastUpdated.After(lastUpdated) {
-				lastUpdated = report.LastUpdated
-			}
-			available = true
-			for _, h := range validProviderHosts {
-				if hostToBackbone[strings.ToLower(strings.TrimSpace(h))] == backbone {
-					capableProvider = h
-					break
-				}
-			}
-			if capableProvider == "" {
-				capableProvider = backbone
-			}
-			break
-		}
-	}
-	if status.Available && !available && len(status.Summary) > 0 {
-		for _, report := range status.Summary {
-			if report.LastUpdated.After(lastUpdated) {
-				lastUpdated = report.LastUpdated
-			}
-		}
-		available = status.Available
-	}
-
-	logger.Debug("AvailNZB CheckPreDownload", "result", "found", "available", available, "capable_provider", capableProvider, "url", releaseURL)
-	return available, lastUpdated, capableProvider, nil
 }
