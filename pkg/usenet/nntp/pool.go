@@ -3,6 +3,7 @@ package nntp
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"streamnzb/pkg/core/logger"
@@ -20,12 +21,22 @@ type ClientPool struct {
 	slots       chan struct{}
 	stopCh      chan struct{} // closed once by Shutdown(); never re-used
 
-	bytesRead      int64
-	totalBytesRead int64
+	// bytesRead and totalBytesRead are bumped on every body-read chunk from many
+	// download goroutines at once; they are atomic so TrackRead never takes the
+	// pool mutex on the hot read path. (bytesRead is write-only today, kept for parity.)
+	bytesRead      atomic.Int64
+	totalBytesRead atomic.Int64
+
+	// lastTotalBytes/lastSpeed/lastCheck are only touched by GetSpeed (seeded by
+	// RestoreTotalBytes) and stay guarded by mu.
 	lastTotalBytes int64
 	lastSpeed      float64
 	lastCheck      time.Time
 
+	// usageMu guards the provider-attribution fields, read on the hot TrackRead
+	// path and written only by the rare SetUsageManager call. A dedicated RWMutex
+	// keeps TrackRead off the general pool mutex (mu), which Get/Put/reaper contend on.
+	usageMu      sync.RWMutex
 	providerName string
 	usageManager *ProviderUsageManager
 
@@ -56,28 +67,32 @@ func NewClientPool(host string, port int, ssl bool, user, pass string, maxConn i
 }
 
 func (p *ClientPool) SetUsageManager(name string, mgr *ProviderUsageManager) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.usageMu.Lock()
+	defer p.usageMu.Unlock()
 	p.providerName = name
 	p.usageManager = mgr
 }
 
 func (p *ClientPool) RestoreTotalBytes(total int64) {
+	p.totalBytesRead.Store(total)
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.totalBytesRead = total
 	p.lastTotalBytes = total
+	p.mu.Unlock()
 }
 
 func (p *ClientPool) TrackRead(n int) {
-	p.mu.Lock()
-	p.bytesRead += int64(n)
-	p.totalBytesRead += int64(n)
+	if n <= 0 {
+		return
+	}
+	p.bytesRead.Add(int64(n))
+	p.totalBytesRead.Add(int64(n))
+
+	p.usageMu.RLock()
 	usageMgr := p.usageManager
 	providerName := p.providerName
-	p.mu.Unlock()
+	p.usageMu.RUnlock()
 
-	if usageMgr != nil && providerName != "" && n > 0 {
+	if usageMgr != nil && providerName != "" {
 		usageMgr.AddBytes(providerName, int64(n))
 	}
 }
@@ -103,8 +118,9 @@ func (p *ClientPool) GetSpeed() float64 {
 		duration = maxSpeedDuration
 	}
 
-	delta := p.totalBytesRead - p.lastTotalBytes
-	p.lastTotalBytes = p.totalBytesRead
+	total := p.totalBytesRead.Load()
+	delta := total - p.lastTotalBytes
+	p.lastTotalBytes = total
 
 	if delta > 0 {
 
@@ -120,11 +136,10 @@ func (p *ClientPool) GetSpeed() float64 {
 }
 
 func (p *ClientPool) TotalMegabytes() float64 {
-	p.mu.Lock()
+	p.usageMu.RLock()
 	usageMgr := p.usageManager
 	providerName := p.providerName
-	totalBytesRead := p.totalBytesRead
-	p.mu.Unlock()
+	p.usageMu.RUnlock()
 
 	if usageMgr != nil && providerName != "" {
 		if usage := usageMgr.GetUsage(providerName); usage != nil {
@@ -132,7 +147,7 @@ func (p *ClientPool) TotalMegabytes() float64 {
 		}
 	}
 
-	return float64(totalBytesRead) / (1024 * 1024)
+	return float64(p.totalBytesRead.Load()) / (1024 * 1024)
 }
 
 func (p *ClientPool) Get(ctx context.Context) (*Client, error) {
@@ -352,9 +367,12 @@ func (p *ClientPool) Shutdown() {
 		return
 	}
 	p.closed = true
+	p.mu.Unlock()
+
+	p.usageMu.RLock()
 	usageMgr := p.usageManager
 	providerName := p.providerName
-	p.mu.Unlock()
+	p.usageMu.RUnlock()
 
 	if usageMgr != nil && providerName != "" {
 		usageMgr.FlushProvider(providerName)

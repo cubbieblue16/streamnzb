@@ -17,6 +17,7 @@ type ProviderUsageManager struct {
 	state         *persistence.StateManager
 	data          map[string]*ProviderUsageData
 	lastPersisted map[string]int64
+	dirty         bool
 	mu            sync.RWMutex
 }
 
@@ -43,7 +44,36 @@ func GetProviderUsageManager(sm *persistence.StateManager) (*ProviderUsageManage
 	m.initLastPersisted()
 
 	providerManager = m
+	go m.flushLoop()
 	return m, nil
+}
+
+// flushInterval bounds how often accumulated provider-usage counters are written
+// back to persistent storage. AddBytes (called per body-read chunk on the download
+// goroutine) only flips a dirty flag now; this loop does the actual full-state
+// write off the hot path, so streaming no longer triggers a JSON marshal + disk
+// write every megabyte.
+const flushInterval = 10 * time.Second
+
+func (m *ProviderUsageManager) flushLoop() {
+	ticker := time.NewTicker(flushInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		m.mu.Lock()
+		dirty := m.dirty
+		m.dirty = false
+		m.mu.Unlock()
+		if !dirty {
+			continue
+		}
+		if err := m.persistAndUpdateLast(); err != nil {
+			logger.Error("Failed to flush provider usage data", "err", err)
+			// Re-arm so the next tick retries rather than dropping the write.
+			m.mu.Lock()
+			m.dirty = true
+			m.mu.Unlock()
+		}
+	}
 }
 
 func (m *ProviderUsageManager) load() error {
@@ -81,8 +111,25 @@ func (m *ProviderUsageManager) initLastPersisted() {
 	}
 }
 
+// snapshot returns a deep copy of the usage map taken under the read lock so
+// callers can marshal/persist it without racing concurrent AddBytes mutations.
+// ProviderUsageData is a flat value (string + two int64s), so copying the struct
+// is a full copy.
+func (m *ProviderUsageManager) snapshot() map[string]*ProviderUsageData {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make(map[string]*ProviderUsageData, len(m.data))
+	for name, d := range m.data {
+		if d != nil {
+			cp := *d
+			out[name] = &cp
+		}
+	}
+	return out
+}
+
 func (m *ProviderUsageManager) save() error {
-	return m.state.Set("provider_usage", m.data)
+	return m.state.Set("provider_usage", m.snapshot())
 }
 
 func (m *ProviderUsageManager) GetUsage(name string) *ProviderUsageData {
@@ -90,6 +137,18 @@ func (m *ProviderUsageManager) GetUsage(name string) *ProviderUsageData {
 	m.mu.Lock()
 
 	data, reset := m.ensureUsageLocked(name, today)
+	// Hand back a copy taken under the lock, never the live map pointer. Callers
+	// read these fields without any lock — ClientPool.TotalMegabytes runs from
+	// collectStats() every second while download goroutines call AddBytes (which
+	// mutates the same struct under m.mu). Returning the live pointer made that an
+	// unsynchronized read/write pair (a real, pre-existing data race the race
+	// detector flags). ProviderUsageData is a flat value, so a struct copy is a
+	// full, safe snapshot.
+	var snap *ProviderUsageData
+	if data != nil {
+		cp := *data
+		snap = &cp
+	}
 	m.mu.Unlock()
 
 	if reset {
@@ -98,7 +157,7 @@ func (m *ProviderUsageManager) GetUsage(name string) *ProviderUsageData {
 		}
 	}
 
-	return data
+	return snap
 }
 
 func (m *ProviderUsageManager) AddBytes(name string, delta int64) {
@@ -107,36 +166,28 @@ func (m *ProviderUsageManager) AddBytes(name string, delta int64) {
 	}
 	today := time.Now().Format("2006-01-02")
 	m.mu.Lock()
-	data, reset := m.ensureUsageLocked(name, today)
+	data, _ := m.ensureUsageLocked(name, today)
 	data.TotalBytes += delta
 	data.AllTimeBytes += delta
-	total := data.TotalBytes
-	last := m.lastPersisted[name]
+	m.dirty = true
 	m.mu.Unlock()
-
-	if reset {
-		if err := m.persistAndUpdateLast(); err != nil {
-			logger.Error("Failed to save reset provider usage data", "name", name, "err", err)
-		}
-		return
-	}
-
-	if total-last >= 1024*1024 {
-		if err := m.persistAndUpdateLast(); err != nil {
-			logger.Error("Failed to save provider usage data", "name", name, "err", err)
-		}
-	}
+	// Persistence is deferred to flushLoop so the download goroutine never does a
+	// JSON marshal + disk write on the hot read path. A day-boundary reset (rare)
+	// is also picked up by the flusher within flushInterval; on crash it is
+	// re-derived by load() on next start, so an unflushed reset is harmless.
 }
 
 func (m *ProviderUsageManager) persistAndUpdateLast() error {
-	if err := m.save(); err != nil {
+	snap := m.snapshot()
+	if err := m.state.Set("provider_usage", snap); err != nil {
 		return err
 	}
+	// Only advance lastPersisted on a successful write, and only to what was
+	// actually persisted (the snapshot), so FlushProvider's "total > last" skip
+	// heuristic never marks unwritten bytes as durable.
 	m.mu.Lock()
-	for n, d := range m.data {
-		if d != nil {
-			m.lastPersisted[n] = d.TotalBytes
-		}
+	for n, d := range snap {
+		m.lastPersisted[n] = d.TotalBytes
 	}
 	m.mu.Unlock()
 	return nil

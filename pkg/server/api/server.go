@@ -93,8 +93,43 @@ func NewServerWithApp(cfg *config.Config, pools map[string]*nntp.ClientPool, ses
 
 	logger.SetBroadcast(s.logCh)
 	go s.broadcastLogs()
+	go s.broadcastStats()
 
 	return s
+}
+
+// broadcastStats computes one system-stats snapshot per second and fans it out to
+// every connected dashboard client. Previously each client ran its own 1s ticker
+// calling collectStats(), so N clients meant N full stat collections per second
+// (each walking every provider pool + indexer, and each mutating per-pool GetSpeed
+// timing state). One shared snapshot scales flat and keeps the speed window stable.
+func (s *Server) broadcastStats() {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.clientsMu.Lock()
+		hasClients := len(s.clients) > 0
+		s.clientsMu.Unlock()
+		if !hasClients {
+			continue
+		}
+
+		stats := s.collectStats()
+		payload, err := json.Marshal(stats)
+		if err != nil {
+			continue
+		}
+		msg := WSMessage{Type: "stats", Payload: payload}
+
+		s.clientsMu.Lock()
+		for client := range s.clients {
+			select {
+			case client.send <- msg:
+			default:
+			}
+		}
+		s.clientsMu.Unlock()
+	}
 }
 
 func (s *Server) broadcastLogs() {

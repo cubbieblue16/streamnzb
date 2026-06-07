@@ -87,9 +87,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	logger.Debug("WS Client connected", "remote", r.RemoteAddr)
 
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
+	// Periodic stats are produced once server-side by broadcastStats() and fanned
+	// out to all clients; this connection just sends an immediate snapshot on
+	// connect so the dashboard isn't blank until the next broadcast tick.
 	go func() {
 		stats := s.collectStats()
 		payload, _ := json.Marshal(stats)
@@ -132,17 +132,13 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	for {
-		select {
-		case <-ticker.C:
-			s.sendStats(client)
-		case msg, ok := <-client.send:
-			if !ok {
-				conn.WriteMessage(websocket.CloseMessage, []byte{})
-				return
-			}
-			if err := conn.WriteJSON(msg); err != nil {
-				return
-			}
+		msg, ok := <-client.send
+		if !ok {
+			conn.WriteMessage(websocket.CloseMessage, []byte{})
+			return
+		}
+		if err := conn.WriteJSON(msg); err != nil {
+			return
 		}
 	}
 }
@@ -154,12 +150,6 @@ func trySendWS(client *Client, msg WSMessage) bool {
 	default:
 		return false
 	}
-}
-
-func (s *Server) sendStats(client *Client) {
-	stats := s.collectStats()
-	payload, _ := json.Marshal(stats)
-	trySendWS(client, WSMessage{Type: "stats", Payload: payload})
 }
 
 func (s *Server) sendConfig(client *Client) {

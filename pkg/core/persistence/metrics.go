@@ -344,3 +344,47 @@ func (m *StateManager) RecordMetricsSnapshot(providers []ProviderMetric, indexer
 		return nil
 	})
 }
+
+// DeleteProviderMetricsBefore removes provider_metrics rows older than cutoff.
+// provider_metrics grows unbounded (a row per provider per snapshot interval),
+// so without retention the GetLatest* full-table max-aggregation scans ever more
+// rows. collected_at is stored in Unix seconds.
+func (m *StateManager) DeleteProviderMetricsBefore(cutoff time.Time) (int64, error) {
+	if m == nil || m.db == nil {
+		return 0, nil
+	}
+	var deleted int64
+	err := m.withWriteLock(func(db *sql.DB) error {
+		res, err := db.Exec(`DELETE FROM provider_metrics WHERE collected_at < ?`, cutoff.Unix())
+		if err != nil {
+			return err
+		}
+		deleted, _ = res.RowsAffected()
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return deleted, nil
+}
+
+// DeleteIndexerMetricsBefore removes indexer_metrics rows older than cutoff.
+// Same unbounded-growth concern as provider_metrics. collected_at is Unix seconds.
+func (m *StateManager) DeleteIndexerMetricsBefore(cutoff time.Time) (int64, error) {
+	if m == nil || m.db == nil {
+		return 0, nil
+	}
+	var deleted int64
+	err := m.withWriteLock(func(db *sql.DB) error {
+		res, err := db.Exec(`DELETE FROM indexer_metrics WHERE collected_at < ?`, cutoff.Unix())
+		if err != nil {
+			return err
+		}
+		deleted, _ = res.RowsAffected()
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return deleted, nil
+}

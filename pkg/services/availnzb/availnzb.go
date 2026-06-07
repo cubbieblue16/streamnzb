@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"streamnzb/pkg/core/logger"
 	"streamnzb/pkg/release"
 )
@@ -37,6 +39,26 @@ type Client struct {
 	apiKeyMu    sync.RWMutex
 	backbonesMu sync.RWMutex
 	backbones   map[string]string
+
+	// releasesSf coalesces concurrent identical GetReleases calls into a single
+	// upstream request; releasesCache serves repeat calls within a short TTL.
+	// Availability can change as releases are processed, so the TTL is short.
+	releasesSf      singleflight.Group
+	releasesCacheMu sync.RWMutex
+	releasesCache   map[string]availReleasesEntry
+}
+
+const (
+	// availReleasesCacheTTL is deliberately short: a release's availability flips
+	// as the backend processes it, so a long TTL would serve stale status. This
+	// only collapses the burst of identical lookups a single stream open triggers.
+	availReleasesCacheTTL        = 30 * time.Second
+	availReleasesCacheMaxEntries = 2048
+)
+
+type availReleasesEntry struct {
+	result    *ReleasesResult
+	expiresAt time.Time
 }
 
 type ReportRequest struct {
@@ -279,7 +301,32 @@ func NewClient(baseURL, apiKey string) *Client {
 		HTTP: &http.Client{
 			Timeout: 10 * time.Second,
 		},
+		releasesCache: make(map[string]availReleasesEntry),
 	}
+}
+
+func (c *Client) getCachedReleases(key string) (*ReleasesResult, bool) {
+	c.releasesCacheMu.RLock()
+	entry, ok := c.releasesCache[key]
+	c.releasesCacheMu.RUnlock()
+	if !ok || time.Now().After(entry.expiresAt) {
+		return nil, false
+	}
+	return entry.result, true
+}
+
+func (c *Client) setCachedReleases(key string, result *ReleasesResult) {
+	c.releasesCacheMu.Lock()
+	defer c.releasesCacheMu.Unlock()
+	if c.releasesCache == nil {
+		c.releasesCache = make(map[string]availReleasesEntry)
+	}
+	// Entries are cheap to refetch, so when full just drop the map wholesale
+	// rather than tracking LRU.
+	if len(c.releasesCache) >= availReleasesCacheMaxEntries {
+		c.releasesCache = make(map[string]availReleasesEntry, availReleasesCacheMaxEntries)
+	}
+	c.releasesCache[key] = availReleasesEntry{result: result, expiresAt: time.Now().Add(availReleasesCacheTTL)}
 }
 
 func (c *Client) GetAPIKey() string {
@@ -880,9 +927,37 @@ func (c *Client) GetReleases(imdbID string, tmdbID string, tvdbID string, season
 		reqURL += "?" + params.Encode()
 	}
 
+	if cached, ok := c.getCachedReleases(reqURL); ok {
+		logger.Trace("AvailNZB GetReleases cache hit", "url", reqURL)
+		return cached, nil
+	}
+
+	// Coalesce concurrent identical lookups (e.g. several stream tiles resolving
+	// at once) into a single upstream request; the others share its result.
+	v, err, _ := c.releasesSf.Do(reqURL, func() (interface{}, error) {
+		if cached, ok := c.getCachedReleases(reqURL); ok {
+			return cached, nil
+		}
+		result, fetchErr := c.doGetReleases(reqURL, apiKey, imdbID, tmdbID, tvdbID, season, episode, len(indexers), len(providers))
+		if fetchErr != nil {
+			return nil, fetchErr
+		}
+		c.setCachedReleases(reqURL, result)
+		return result, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if v == nil {
+		return nil, nil
+	}
+	return v.(*ReleasesResult), nil
+}
+
+func (c *Client) doGetReleases(reqURL, apiKey, imdbID, tmdbID, tvdbID string, season, episode, indexerCount, providerCount int) (*ReleasesResult, error) {
 	logger.Debug("AvailNZB GetReleases", availReleasesLogArgs(imdbID, tmdbID, tvdbID, season, episode,
-		"indexers", len(indexers),
-		"providers", len(providers),
+		"indexers", indexerCount,
+		"providers", providerCount,
 	)...)
 
 	req, err := http.NewRequest("GET", reqURL, nil)

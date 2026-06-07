@@ -1,20 +1,42 @@
 package tmdb
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 	"streamnzb/pkg/core/logger"
 	"streamnzb/pkg/release"
 	"strings"
+	"sync"
 	"time"
 )
+
+const (
+	// tmdbCacheTTL bounds how long a GET response is reused. TMDB metadata
+	// (titles, external IDs, translations, season/episode lists) is effectively
+	// immutable for our purposes, but the same (endpoint, params) was being
+	// re-fetched on every stream click. A day is plenty to collapse those.
+	tmdbCacheTTL = 24 * time.Hour
+	// tmdbCacheMaxEntries is a crude upper bound so a pathological number of
+	// distinct titles in one TTL window can't grow the map without limit.
+	tmdbCacheMaxEntries = 4096
+)
+
+type cacheEntry struct {
+	body      []byte
+	expiresAt time.Time
+}
 
 type Client struct {
 	apiKey string
 	client *http.Client
+
+	cacheMu sync.RWMutex
+	cache   map[string]cacheEntry
 }
 
 func NewClient(apiKey string) *Client {
@@ -23,6 +45,48 @@ func NewClient(apiKey string) *Client {
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
+		cache: make(map[string]cacheEntry),
+	}
+}
+
+func (c *Client) cacheGet(key string) ([]byte, bool) {
+	c.cacheMu.RLock()
+	entry, ok := c.cache[key]
+	c.cacheMu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	if time.Now().After(entry.expiresAt) {
+		c.cacheMu.Lock()
+		if e, ok := c.cache[key]; ok && time.Now().After(e.expiresAt) {
+			delete(c.cache, key)
+		}
+		c.cacheMu.Unlock()
+		return nil, false
+	}
+	return entry.body, true
+}
+
+func (c *Client) cacheSet(key string, body []byte) {
+	c.cacheMu.Lock()
+	defer c.cacheMu.Unlock()
+	if c.cache == nil {
+		c.cache = make(map[string]cacheEntry)
+	}
+	// Entries are cheap to refetch, so when full just drop the map wholesale
+	// rather than tracking LRU.
+	if len(c.cache) >= tmdbCacheMaxEntries {
+		c.cache = make(map[string]cacheEntry, tmdbCacheMaxEntries)
+	}
+	c.cache[key] = cacheEntry{body: body, expiresAt: time.Now().Add(tmdbCacheTTL)}
+}
+
+func newCachedResponse(body []byte) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Body:       io.NopCloser(bytes.NewReader(body)),
+		Header:     make(http.Header),
 	}
 }
 
@@ -135,6 +199,13 @@ func (c *Client) doRequest(endpoint string, params url.Values) (*http.Response, 
 		params = url.Values{}
 	}
 
+	// Cache key is the endpoint + params BEFORE credentials are injected, so the
+	// api_key query param never pollutes the key.
+	cacheKey := endpoint + "?" + params.Encode()
+	if body, ok := c.cacheGet(cacheKey); ok {
+		return newCachedResponse(body), nil
+	}
+
 	// TMDB accepts two credential formats. A v4 "API Read Access Token" is a JWT
 	// (always contains dots) sent as a Bearer header; a v3 API key is a 32-char
 	// hex string with no dots, passed as the api_key query parameter. Detect
@@ -157,7 +228,26 @@ func (c *Client) doRequest(endpoint string, params url.Values) (*http.Response, 
 	}
 	req.Header.Set("accept", "application/json")
 
-	return c.client.Do(req)
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	// Only cache successes; non-200s are passed through untouched so callers see
+	// the real status. The original body is consumed here and replaced with a
+	// reader over the buffered bytes so existing decode/Close call sites are
+	// unaffected.
+	if resp.StatusCode == http.StatusOK {
+		data, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("TMDB read body: %w", readErr)
+		}
+		c.cacheSet(cacheKey, data)
+		resp.Body = io.NopCloser(bytes.NewReader(data))
+	}
+
+	return resp, nil
 }
 
 func (c *Client) Find(externalID, source string) (*FindResponse, error) {

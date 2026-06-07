@@ -85,6 +85,18 @@ func BuildComponents(cfg *config.Config) (*InitializedComponents, error) {
 		} else if deleted > 0 {
 			logger.Info("Pruned NZB attempt history", "retention_days", cfg.NZBHistoryRetentionDays, "deleted", deleted)
 		}
+		// provider_metrics / indexer_metrics grow unbounded otherwise; prune them
+		// on the same retention window so the dashboard's summary queries stay fast.
+		if pruned, err := stateMgr.DeleteProviderMetricsBefore(cutoff); err != nil {
+			logger.Warn("Failed to prune provider metrics history", "retention_days", cfg.NZBHistoryRetentionDays, "err", err)
+		} else if pruned > 0 {
+			logger.Info("Pruned provider metrics history", "retention_days", cfg.NZBHistoryRetentionDays, "deleted", pruned)
+		}
+		if pruned, err := stateMgr.DeleteIndexerMetricsBefore(cutoff); err != nil {
+			logger.Warn("Failed to prune indexer metrics history", "retention_days", cfg.NZBHistoryRetentionDays, "err", err)
+		} else if pruned > 0 {
+			logger.Info("Pruned indexer metrics history", "retention_days", cfg.NZBHistoryRetentionDays, "deleted", pruned)
+		}
 	}
 
 	usageMgr, err := indexer.GetUsageManager(stateMgr)

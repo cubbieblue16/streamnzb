@@ -1173,9 +1173,34 @@ func (m *Manager) GetSession(sessionID string) (*Session, error) {
 	return session, nil
 }
 
+// minFreeOSMemoryInterval bounds how often debug.FreeOSMemory() (a stop-the-world
+// GC + scavenge) may run. Rapid session churn (e.g. next-episode transitions firing
+// delete+create) would otherwise trigger repeated full GCs that stutter active playback.
+const minFreeOSMemoryInterval = 30 * time.Second
+
+// lastFreeOSMemoryNanos is the unix-nano timestamp of the last freeOSMemory() run.
+var lastFreeOSMemoryNanos atomic.Int64
+
 // freeOSMemory runs GC and returns unused memory to the OS so RSS drops after session close.
-func freeOSMemory() {
+// It is a package var (not a plain func) purely so tests can substitute a counter and
+// assert the debounce in maybeFreeOSMemory without invoking the real stop-the-world GC.
+var freeOSMemory = func() {
 	debug.FreeOSMemory()
+}
+
+// maybeFreeOSMemory runs freeOSMemory at most once per minFreeOSMemoryInterval.
+// The CompareAndSwap ensures only one goroutine wins the debounce window even under
+// concurrent teardowns, so bursts of session deletes collapse into a single GC.
+func maybeFreeOSMemory() {
+	now := time.Now().UnixNano()
+	last := lastFreeOSMemoryNanos.Load()
+	if now-last < int64(minFreeOSMemoryInterval) {
+		return
+	}
+	if !lastFreeOSMemoryNanos.CompareAndSwap(last, now) {
+		return
+	}
+	freeOSMemory()
 }
 
 func summarizeClientPools(pools []*nntp.ClientPool) string {
@@ -1314,7 +1339,8 @@ func (m *Manager) DeleteSession(sessionID string) {
 		m.maybePurgePoolCache()
 		m.traceTeardownSnapshot("delete_session", sessionID)
 		// Suggest returning freed memory to the OS so RSS drops (Go keeps heap by default).
-		go freeOSMemory()
+		// Debounced so rapid session churn doesn't trigger repeated stop-the-world GCs.
+		go maybeFreeOSMemory()
 	} else {
 		logger.Trace("session DeleteSession no session", "id", sessionID)
 	}
@@ -1472,7 +1498,7 @@ func (m *Manager) cleanup() {
 		for _, id := range closedIDs {
 			m.traceTeardownSnapshot("cleanup_evict", id)
 		}
-		go freeOSMemory()
+		go maybeFreeOSMemory()
 	}
 
 	m.slotFailedDuringPlayback.Range(func(key, val any) bool {

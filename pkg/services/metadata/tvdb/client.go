@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"streamnzb/pkg/core/logger"
 	"streamnzb/pkg/core/persistence"
+	"sync"
 	"time"
 )
 
@@ -22,10 +23,17 @@ const (
 )
 
 type Client struct {
-	apiKey     string
-	dataDir    string
-	client     *http.Client
-	tokenCache string
+	apiKey  string
+	dataDir string
+	client  *http.Client
+
+	// mu guards tokenCache (previously an unsynchronized field, a data race when
+	// multiple lookups ran concurrently) and resolveCache. It is never held across
+	// a ResolveTVDBID network round-trip — only across the token login, which is
+	// rare and where serializing concurrent callers avoids duplicate logins.
+	mu           sync.Mutex
+	tokenCache   string
+	resolveCache map[string]string
 }
 
 func NewClient(apiKey, dataDir string) *Client {
@@ -35,6 +43,7 @@ func NewClient(apiKey, dataDir string) *Client {
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
+		resolveCache: make(map[string]string),
 	}
 }
 
@@ -69,6 +78,9 @@ func (c *Client) ensureToken() (string, error) {
 	if c.apiKey == "" {
 		return "", fmt.Errorf("TVDB API key not configured")
 	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	if c.tokenCache != "" {
 		return c.tokenCache, nil
@@ -139,7 +151,9 @@ func (c *Client) login() (string, error) {
 }
 
 func (c *Client) invalidateToken() {
+	c.mu.Lock()
 	c.tokenCache = ""
+	c.mu.Unlock()
 }
 
 func (c *Client) doRequest(method, path string, body []byte) (*http.Response, error) {
@@ -178,6 +192,17 @@ func (c *Client) ResolveTVDBID(remoteID string) (string, error) {
 	if c.apiKey == "" {
 		return "", fmt.Errorf("TVDB API key not configured")
 	}
+
+	// remoteID -> tvdbID is an immutable mapping; cache successful resolutions so
+	// the same series isn't re-resolved (token check + network round-trip) on
+	// every stream click. Failures are intentionally not cached.
+	c.mu.Lock()
+	if cached, ok := c.resolveCache[remoteID]; ok {
+		c.mu.Unlock()
+		return cached, nil
+	}
+	c.mu.Unlock()
+
 	resp, err := c.doRequest("GET", "/search/remoteid/"+remoteID, nil)
 	if err != nil {
 		return "", err
@@ -200,17 +225,26 @@ func (c *Client) ResolveTVDBID(remoteID string) (string, error) {
 	}
 
 	for _, item := range out.Data {
-		if item.Episode != nil && item.Episode.SeriesID != 0 {
+		var resolved string
+		switch {
+		case item.Episode != nil && item.Episode.SeriesID != 0:
+			resolved = strconv.Itoa(item.Episode.SeriesID)
 			logger.Debug("Resolved TVDB ID from remote ID", "remote", remoteID, "tvdb", item.Episode.SeriesID)
-			return strconv.Itoa(item.Episode.SeriesID), nil
-		}
-		if item.Series != nil && item.Series.ID != 0 {
+		case item.Series != nil && item.Series.ID != 0:
+			resolved = strconv.Itoa(item.Series.ID)
 			logger.Debug("Resolved TVDB ID from remote ID (series)", "remote", remoteID, "tvdb", item.Series.ID)
-			return strconv.Itoa(item.Series.ID), nil
-		}
-		if item.Movie != nil && item.Movie.ID != 0 {
+		case item.Movie != nil && item.Movie.ID != 0:
+			resolved = strconv.Itoa(item.Movie.ID)
 			logger.Debug("Resolved TVDB ID from remote ID (movie)", "remote", remoteID, "tvdb", item.Movie.ID)
-			return strconv.Itoa(item.Movie.ID), nil
+		}
+		if resolved != "" {
+			c.mu.Lock()
+			if c.resolveCache == nil {
+				c.resolveCache = make(map[string]string)
+			}
+			c.resolveCache[remoteID] = resolved
+			c.mu.Unlock()
+			return resolved, nil
 		}
 	}
 	return "", fmt.Errorf("no TVDB ID found for remote ID: %s", remoteID)

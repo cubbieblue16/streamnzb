@@ -50,6 +50,10 @@ const (
 	nzbAttemptsIndexStream   = `CREATE INDEX IF NOT EXISTS idx_nzb_attempts_stream_name ON nzb_attempts(stream_name);`
 	nzbAttemptsIndexProvider = `CREATE INDEX IF NOT EXISTS idx_nzb_attempts_provider_name ON nzb_attempts(provider_name);`
 	nzbAttemptsIndexIndexer  = `CREATE INDEX IF NOT EXISTS idx_nzb_attempts_indexer_name ON nzb_attempts(indexer_name);`
+	// slot_path is filtered on the hot playback path (RecordPreloadAttempt /
+	// UpdatePendingAttempt / ResolvePendingAttempt / RecordAttempt). Without this
+	// index each of those did a full table scan that worsened as history grew.
+	nzbAttemptsIndexSlot = `CREATE INDEX IF NOT EXISTS idx_nzb_attempts_slot_path ON nzb_attempts(slot_path);`
 
 	providerMetricsSchema = `CREATE TABLE IF NOT EXISTS provider_metrics (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -154,7 +158,7 @@ func initSchema(db *sql.DB) error {
 	if err := migrateNzbAttemptsAvailReason(db); err != nil {
 		return err
 	}
-	for _, stmt := range []string{nzbAttemptsIndexStream, nzbAttemptsIndexProvider, nzbAttemptsIndexIndexer} {
+	for _, stmt := range []string{nzbAttemptsIndexStream, nzbAttemptsIndexProvider, nzbAttemptsIndexIndexer, nzbAttemptsIndexSlot} {
 		if _, err := db.Exec(stmt); err != nil {
 			return fmt.Errorf("schema: %w", err)
 		}
