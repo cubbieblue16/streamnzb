@@ -16,6 +16,7 @@ import (
 	"streamnzb/pkg/services/availnzb"
 	"streamnzb/pkg/services/metadata/tmdb"
 	"streamnzb/pkg/services/metadata/tvdb"
+	"streamnzb/pkg/services/par2"
 	"streamnzb/pkg/usenet/nntp"
 	"streamnzb/pkg/usenet/pool"
 	"streamnzb/pkg/usenet/validation"
@@ -47,6 +48,7 @@ type Components struct {
 	TMDBClient           *tmdb.Client
 	TVDBClient           *tvdb.Client
 	SegmentCacheBudget   *pool.SegmentCacheBudget
+	Par2                 *par2.Service
 }
 
 type App struct {
@@ -155,6 +157,7 @@ func (a *App) buildFull(cfg *config.Config, opts BuildOpts) (*Components, error)
 		TMDBClient:           tmdbClient,
 		TVDBClient:           tvdbClient,
 		SegmentCacheBudget:   base.SegmentCacheBudget,
+		Par2:                 base.Par2,
 	}, nil
 }
 
@@ -212,6 +215,9 @@ func (a *App) Reload(newCfg *config.Config) (*Components, bool, error) {
 		comp.TMDBClient = tmdb.NewClient(a.effectiveTMDBKey())
 		dataDir := resolveDataDir(a.opts.DataDir, newCfg.LoadedPath)
 		comp.TVDBClient = tvdb.NewClient(a.effectiveTVDBKey(), dataDir)
+		// Rebuild the PAR2 service so toggling par2_* (a config-only change) takes
+		// effect without a provider/indexer restart.
+		comp.Par2 = initialization.NewPar2Service(newCfg)
 		a.components = &comp
 		return &comp, false, nil
 

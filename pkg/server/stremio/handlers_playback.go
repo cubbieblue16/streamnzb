@@ -31,8 +31,42 @@ import (
 	"streamnzb/pkg/media/unpack"
 	searchparser "streamnzb/pkg/search/parser"
 	"streamnzb/pkg/services/availnzb"
+	"streamnzb/pkg/services/notifier"
 	"streamnzb/pkg/session"
 )
+
+// emitPlaybackAlert raises a playback-related alert for a session. Global Emit is
+// nil-safe (a no-op when alerting is disabled or the event type is toggled off)
+// and the notifier rate-limits by title, so repeated failures of the same
+// release collapse to one alert per interval. The title carries the release name
+// so distinct failing releases each surface while retries of one do not storm.
+func emitPlaybackAlert(evType notifier.EventType, titlePrefix, message string, sess *session.Session, sessionID string, err error) {
+	release := sessionID
+	imdb := ""
+	if sess != nil {
+		if n := sess.ReportReleaseName(); n != "" {
+			release = n
+		}
+		if sess.ContentIDs != nil {
+			imdb = sess.ContentIDs.ImdbID
+		}
+	}
+	errText := ""
+	if err != nil {
+		errText = err.Error()
+	}
+	notifier.Emit(notifier.Event{
+		Type:    evType,
+		Title:   titlePrefix + ": " + release,
+		Message: message,
+		Fields: map[string]string{
+			"release": release,
+			"imdb":    imdb,
+			"session": sessionID,
+			"error":   errText,
+		},
+	})
+}
 
 type writeTimeoutResponseWriter struct {
 	http.ResponseWriter
@@ -293,7 +327,11 @@ func (s *Server) buildStreamsForKey(ctx context.Context, key StreamSlotKey, stre
 	}
 	streamName := "StreamNZB"
 	showAll := streamResultsMode(stream) == "display_all"
-	return buildStreamsFromPlaylist(list, key, streamName, baseURL, showAll), list, nil
+	labelFormat := "detailed"
+	if s.config != nil {
+		labelFormat = s.config.EffectiveStreamLabelFormat()
+	}
+	return buildStreamsFromPlaylist(list, key, streamName, baseURL, labelFormat, showAll), list, nil
 }
 
 // bootstrapPlaylistForPlay rebuilds the play list and deferred sessions the same way as /stream.
@@ -1236,6 +1274,25 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request, streamConfig
 				}
 			}
 			logger.Info("No more fallback slots", "last", sessionID, "err", prepareErr)
+			// Gated last-resort recovery: when PAR2 repair is enabled (off by
+			// default) and the release carries recovery files, download the full
+			// fileset, repair it with par2, and serve the reconstructed media.
+			// mergedCtx was canceled above, so the repair runs on a fresh
+			// request-scoped context; on success we reassign mergedCtx/mergedCancel
+			// to a live context so the serve path's close/lifecycle wiring below
+			// (which keys off mergedCtx.Done()) doesn't instantly tear down the
+			// repaired stream.
+			if par2Stream, par2Name, par2Size, par2OK := s.attemptPar2Repair(r.Context(), sess); par2OK {
+				mergedCtx, mergedCancel = context.WithCancel(r.Context())
+				stream = par2Stream
+				name = par2Name
+				size = par2Size
+				haveStartupInfo = false
+				streamMode = "par2-repair"
+				break
+			}
+			emitPlaybackAlert(notifier.EventFailoverExhausted, "Playback failover exhausted",
+				"All fallback releases failed; no more slots to try.", sess, sessionID, prepareErr)
 			forceDisconnect(w, r, s.baseURL)
 			return
 		}
@@ -1727,6 +1784,8 @@ func (s *Server) openPlaybackSource(ctx context.Context, sess *session.Session) 
 	cacheReturnedPlaybackBlueprint(sess, bp)
 	if err != nil {
 		logger.Error("Failed to open media stream", "id", sessionID, "err", err)
+		emitPlaybackAlert(notifier.EventPlaybackFailure, "Playback failed",
+			"Could not open the media stream for the selected release.", sess, sessionID, err)
 		if sess.NZB != nil {
 			s.validator.InvalidateCache(sess.NZB.Hash())
 		}

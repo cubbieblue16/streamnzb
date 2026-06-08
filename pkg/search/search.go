@@ -124,7 +124,9 @@ func RunIndexerSearches(idx indexer.Indexer, req indexer.SearchRequest, contentT
 		if len(filtered) == 0 {
 			return nil
 		}
-		return indexer.NewAggregator(filtered...)
+		sub := indexer.NewAggregator(filtered...)
+		sub.QuotaAware = agg.QuotaAware
+		return sub
 	}
 
 	// NOTE: Per-indexer DisableIdSearch / DisableStringSearch flags are enforced

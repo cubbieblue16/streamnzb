@@ -492,3 +492,91 @@ func TestSaveFileDoesNotPersistAvailNZBAPIKey(t *testing.T) {
 		t.Fatalf("config.json should not contain AvailNZBAPIKey value")
 	}
 }
+
+func TestRedactForAPIHidesNotifierChannelSecrets(t *testing.T) {
+	enabled := true
+	cfg := &Config{
+		Notifier: &NotifierConfig{
+			Enabled: true,
+			Events:  map[string]bool{"provider_down": true},
+			Channels: []NotifierChannelConfig{
+				{
+					Name:    "discord",
+					Type:    "discord",
+					URL:     "https://discord.com/api/webhooks/secret-token",
+					Header:  "Authorization: Bearer top-secret",
+					Enabled: &enabled,
+				},
+			},
+		},
+	}
+	red := cfg.RedactForAPI()
+	if red.Notifier == nil || len(red.Notifier.Channels) != 1 {
+		t.Fatalf("expected notifier channel structure preserved, got %+v", red.Notifier)
+	}
+	ch := red.Notifier.Channels[0]
+	if ch.URL != "" || ch.Header != "" {
+		t.Fatalf("expected URL and Header redacted, got url=%q header=%q", ch.URL, ch.Header)
+	}
+	if ch.Name != "discord" || ch.Type != "discord" {
+		t.Fatalf("expected non-secret fields preserved, got name=%q type=%q", ch.Name, ch.Type)
+	}
+	// The original config must be untouched (RedactForAPI returns a copy).
+	if cfg.Notifier.Channels[0].URL == "" {
+		t.Fatal("RedactForAPI mutated the source config's channel URL")
+	}
+}
+
+func TestPar2ConfigDefaults(t *testing.T) {
+	// Unset config: defaults applied, disabled.
+	var nilCfg *Config
+	def := nilCfg.Par2Config()
+	if def.Enabled {
+		t.Error("nil config Par2 enabled, want disabled")
+	}
+	if def.BinaryPath != defaultPar2BinaryPath || def.MaxConcurrent != defaultPar2MaxConcurrent || def.TimeoutMinutes != defaultPar2TimeoutMinutes {
+		t.Errorf("nil config defaults = %+v", def)
+	}
+
+	empty := (&Config{}).Par2Config()
+	if empty.Enabled {
+		t.Error("empty config Par2 enabled, want disabled (opt-in)")
+	}
+	if empty.BinaryPath != "par2" || empty.MaxConcurrent != 1 || empty.TimeoutMinutes != 30 {
+		t.Errorf("empty config defaults = %+v, want par2/1/30", empty)
+	}
+	if empty.MaxBytes != 0 {
+		t.Errorf("empty MaxBytes = %d, want 0 (unlimited)", empty.MaxBytes)
+	}
+}
+
+func TestPar2ConfigOverridesAndClamps(t *testing.T) {
+	on := true
+	cfg := &Config{
+		Par2Enable:         &on,
+		Par2BinaryPath:     "  /usr/bin/par2  ",
+		Par2WorkDir:        "  /scratch  ",
+		Par2MaxConcurrent:  -5,  // clamps to default 1
+		Par2TimeoutMinutes: 0,   // clamps to default 30
+		Par2MaxBytes:       -10, // clamps to 0
+	}
+	s := cfg.Par2Config()
+	if !s.Enabled {
+		t.Error("Enabled = false, want true")
+	}
+	if s.BinaryPath != "/usr/bin/par2" {
+		t.Errorf("BinaryPath = %q, want trimmed /usr/bin/par2", s.BinaryPath)
+	}
+	if s.WorkDir != "/scratch" {
+		t.Errorf("WorkDir = %q, want trimmed /scratch", s.WorkDir)
+	}
+	if s.MaxConcurrent != 1 {
+		t.Errorf("MaxConcurrent = %d, want clamped 1", s.MaxConcurrent)
+	}
+	if s.TimeoutMinutes != 30 {
+		t.Errorf("TimeoutMinutes = %d, want clamped 30", s.TimeoutMinutes)
+	}
+	if s.MaxBytes != 0 {
+		t.Errorf("MaxBytes = %d, want clamped 0", s.MaxBytes)
+	}
+}

@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"sort"
@@ -786,6 +788,101 @@ func selectSessionContentFiles(nzbData *nzb.NZB, contentIDs *AvailReportMeta) []
 		episode = contentIDs.Episode
 	}
 	return nzbData.GetSessionContentFilesForEpisode(season, episode)
+}
+
+// FilesetTotalBytes reports the summed declared size of every file in the
+// session's NZB (data files plus .par2 recovery files). Used by the optional
+// PAR2 repair fallback for its pre-download disk-budget check. Returns 0 when no
+// NZB is loaded.
+func (s *Session) FilesetTotalBytes() int64 {
+	if s == nil || s.NZB == nil {
+		return 0
+	}
+	var total int64
+	for _, info := range s.NZB.GetFileInfo() {
+		if info != nil {
+			total += info.Size
+		}
+	}
+	return total
+}
+
+// MaterializeFilesetToDir streams every file in the session's NZB — content
+// files AND .par2 recovery files — into dstDir, returning the base names
+// written. The regular session.Files slice holds only content files (recovery
+// files are excluded from playback selection), so the PAR2 repair fallback needs
+// this to assemble the complete repair set. It reuses the session's
+// pools/fetcher/estimator and does not mutate any session state.
+func (m *Manager) MaterializeFilesetToDir(ctx context.Context, sess *Session, dstDir string) ([]string, error) {
+	if sess == nil || sess.NZB == nil {
+		return nil, fmt.Errorf("session has no NZB to materialize")
+	}
+	infos := sess.NZB.GetFileInfo()
+	if len(infos) == 0 {
+		return nil, fmt.Errorf("NZB has no files")
+	}
+	m.mu.RLock()
+	pools := m.pools
+	usenetPool := m.usenetPool
+	estimator := m.estimator
+	m.mu.RUnlock()
+	fetcher := sess.segmentFetcher
+	if fetcher == nil {
+		fetcher = usenetPool
+	}
+
+	written := make([]string, 0, len(infos))
+	for _, info := range infos {
+		if info == nil || info.File == nil {
+			continue
+		}
+		name := strings.TrimSpace(info.Filename)
+		if name == "" {
+			name = fileutil.ExtractFilename(info.File.Subject)
+		}
+		if name == "" {
+			continue
+		}
+		base := filepath.Base(name)
+		var lf *loader.File
+		if fetcher != nil {
+			lf = loader.NewFile(ctx, info.File, nil, estimator, fetcher)
+		} else {
+			lf = loader.NewFile(ctx, info.File, pools, estimator, nil)
+		}
+		lf.SetOwnerSessionID(sess.ID)
+		if err := streamLoaderFileToDisk(ctx, lf, filepath.Join(dstDir, base)); err != nil {
+			return nil, fmt.Errorf("materialize %q: %w", base, err)
+		}
+		written = append(written, base)
+	}
+	if len(written) == 0 {
+		return nil, fmt.Errorf("no files materialized from NZB")
+	}
+	return written, nil
+}
+
+// streamLoaderFileToDisk reconstructs a single loader file from Usenet and writes
+// it to dest.
+func streamLoaderFileToDisk(ctx context.Context, lf *loader.File, dest string) error {
+	rc, err := lf.OpenStreamCtx(ctx)
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	out, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	if _, copyErr := io.Copy(out, rc); copyErr != nil {
+		out.Close()
+		return copyErr
+	}
+	if syncErr := out.Sync(); syncErr != nil {
+		out.Close()
+		return syncErr
+	}
+	return out.Close()
 }
 
 func buildLoaderFiles(ctx context.Context, ownerID string, contentFiles []*nzb.FileInfo, pools []*nntp.ClientPool, usenetPool loader.SegmentFetcher, estimator *loader.SegmentSizeEstimator) []*loader.File {

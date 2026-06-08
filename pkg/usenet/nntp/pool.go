@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"streamnzb/pkg/core/logger"
+	"streamnzb/pkg/services/notifier"
 )
 
 type ClientPool struct {
@@ -172,12 +173,14 @@ func (p *ClientPool) Get(ctx context.Context) (*Client, error) {
 		c, err := NewClient(p.host, p.port, p.ssl)
 		if err != nil {
 			p.slots <- struct{}{}
+			p.emitProviderDown(err)
 			return nil, err
 		}
 		c.SetPool(p)
 		if err := c.Authenticate(p.user, p.pass); err != nil {
 			c.Quit()
 			p.slots <- struct{}{}
+			p.emitAuthFailure(err)
 			return nil, err
 		}
 		logger.VerboseNNTP("nntp pool Get new client", "host", p.host)
@@ -205,12 +208,14 @@ func (p *ClientPool) Get(ctx context.Context) (*Client, error) {
 		c, err := NewClient(p.host, p.port, p.ssl)
 		if err != nil {
 			p.slots <- struct{}{}
+			p.emitProviderDown(err)
 			return nil, err
 		}
 		c.SetPool(p)
 		if err := c.Authenticate(p.user, p.pass); err != nil {
 			c.Quit()
 			p.slots <- struct{}{}
+			p.emitAuthFailure(err)
 			return nil, err
 		}
 		if wait >= 250*time.Millisecond {
@@ -238,12 +243,14 @@ func (p *ClientPool) TryGet(ctx context.Context) (*Client, bool) {
 		c, err := NewClient(p.host, p.port, p.ssl)
 		if err != nil {
 			p.slots <- struct{}{}
+			p.emitProviderDown(err)
 			return nil, false
 		}
 		c.SetPool(p)
 		if err := c.Authenticate(p.user, p.pass); err != nil {
 			c.Quit()
 			p.slots <- struct{}{}
+			p.emitAuthFailure(err)
 			return nil, false
 		}
 		return c, true
@@ -291,6 +298,56 @@ func (p *ClientPool) Discard(c *Client) {
 	logger.VerboseNNTP("nntp pool Discard connection not returned to pool", "host", p.host)
 	c.Quit()
 	p.slots <- struct{}{}
+}
+
+// emitAuthFailure raises a provider_auth_fail alert. Global Emit is nil-safe
+// (no-op when alerting is disabled), and the notifier rate-limits by title so
+// repeated failures across this pool's connections collapse to one alert per
+// interval rather than storming.
+func (p *ClientPool) emitAuthFailure(err error) {
+	name := p.providerName
+	if name == "" {
+		name = p.host
+	}
+	errText := ""
+	if err != nil {
+		errText = err.Error()
+	}
+	notifier.Emit(notifier.Event{
+		Type:    notifier.EventProviderAuthFail,
+		Title:   "Usenet auth failed: " + name,
+		Message: "Authentication to Usenet provider " + name + " failed.",
+		Fields: map[string]string{
+			"provider": name,
+			"host":     p.host,
+			"error":    errText,
+		},
+	})
+}
+
+// emitProviderDown raises a provider_down alert when a new NNTP connection
+// cannot be established (dial/TLS failure). Like emitAuthFailure, Global Emit is
+// nil-safe and the notifier rate-limits by title, so a burst of failed dials
+// across this pool's connections collapses to one alert per interval.
+func (p *ClientPool) emitProviderDown(err error) {
+	name := p.providerName
+	if name == "" {
+		name = p.host
+	}
+	errText := ""
+	if err != nil {
+		errText = err.Error()
+	}
+	notifier.Emit(notifier.Event{
+		Type:    notifier.EventProviderDown,
+		Title:   "Usenet provider unreachable: " + name,
+		Message: "Could not establish a connection to Usenet provider " + name + ".",
+		Fields: map[string]string{
+			"provider": name,
+			"host":     p.host,
+			"error":    errText,
+		},
+	})
 }
 
 func (p *ClientPool) reaperLoop() {

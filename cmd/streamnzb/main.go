@@ -208,6 +208,7 @@ func main() {
 		StreamManager:        streamManager,
 		Version:              Version,
 		AttemptRecorder:      stateMgr,
+		Par2:                 comp.Par2,
 	})
 	if err != nil {
 		initialization.WaitForInputAndExit(fmt.Errorf("failed to initialize Stremio server: %v", err))

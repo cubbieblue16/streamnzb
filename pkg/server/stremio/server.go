@@ -16,6 +16,7 @@ import (
 	"streamnzb/pkg/services/availnzb"
 	"streamnzb/pkg/services/metadata/tmdb"
 	"streamnzb/pkg/services/metadata/tvdb"
+	"streamnzb/pkg/services/par2"
 	"streamnzb/pkg/session"
 	"streamnzb/pkg/usenet/validation"
 )
@@ -56,6 +57,7 @@ type Server struct {
 	onAttemptRecorded         func()
 	availIndexerStats         map[string]AvailIndexerStats
 	uniqueIndexerHits         map[string]int64
+	par2                      *par2.Service // last-resort PAR2 repair; nil/disabled = no-op
 }
 
 // AvailIndexerStats stores per-indexer availability outcomes aggregated from
@@ -83,6 +85,7 @@ type ServerOptions struct {
 	StreamManager        *auth.StreamManager
 	Version              string
 	AttemptRecorder      *persistence.StateManager
+	Par2                 *par2.Service
 }
 
 func NewServer(opts *ServerOptions) (*Server, error) {
@@ -123,6 +126,7 @@ func NewServer(opts *ServerOptions) (*Server, error) {
 		attemptRecorder:      opts.AttemptRecorder,
 		availIndexerStats:    make(map[string]AvailIndexerStats),
 		uniqueIndexerHits:    make(map[string]int64),
+		par2:                 opts.Par2,
 	}
 
 	if err := s.CheckPort(opts.Port); err != nil {
@@ -279,4 +283,7 @@ func (s *Server) Reload(opts *ServerOptions) {
 	s.tmdbClient = opts.TMDBClient
 	s.tvdbClient = opts.TVDBClient
 	s.streamManager = opts.StreamManager
+	if opts.Par2 != nil {
+		s.par2 = opts.Par2
+	}
 }

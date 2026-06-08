@@ -1,11 +1,12 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react'
 import { useForm, useFieldArray } from 'react-hook-form'
-import { AlertTriangle, Network, SlidersHorizontal, Server, Globe, Search, Loader2, Save } from "lucide-react"
+import { AlertTriangle, Network, SlidersHorizontal, Server, Globe, Search, Loader2, Save, Bell } from "lucide-react"
 import { IndexerSettings } from "@/components/IndexerSettings"
 import { ProviderSettings } from "@/components/ProviderSettings"
 import { SearchQuerySettings } from "@/components/SearchQuerySettings"
 import { NetworkSettingsSection } from "@/components/NetworkSettingsSection"
 import { AdvancedSettingsSection } from "@/components/AdvancedSettingsSection"
+import { NotificationsSection } from "@/components/NotificationsSection"
 import { cn } from "@/lib/utils"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -20,6 +21,7 @@ const TABS = [
   { id: 'indexers', label: 'Indexers', icon: Server },
   { id: 'providers', label: 'Providers', icon: Globe },
   { id: 'search_query', label: 'Search', icon: Search },
+  { id: 'notifications', label: 'Notifications', icon: Bell },
   { id: 'advanced', label: 'Advanced', icon: SlidersHorizontal },
 ]
 
@@ -459,6 +461,14 @@ function Settings({
               onClearStatus={clearTransientStatus}
             />
           </div>
+        )}
+
+        {activeTab === 'notifications' && (
+          <NotificationsSection
+            initialValues={configSnapshot?.notifier}
+            isSaving={isSaving}
+            onPersist={(payload) => submitSettings({ notifier: payload }, 'notifications')}
+          />
         )}
 
         {visibleFooterStatus?.message && (

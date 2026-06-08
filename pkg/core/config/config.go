@@ -37,11 +37,11 @@ const (
 	// SeriesSearchScopeDate searches date-organised shows (e.g. WWE Raw) by the
 	// episode air date instead of SxxExx. Forced automatically for registered
 	// date-based shows; see pkg/datebased.
-	SeriesSearchScopeDate = "date"
-	legacySeriesSearchScopeEpisodeParam    = "episode_param"
-	legacySeriesSearchScopeEpisodeQuery    = "episode_query"
-	legacySeriesSearchScopeSeasonParam     = "season_param"
-	legacySeriesSearchScopeSeasonQuery     = "season_query"
+	SeriesSearchScopeDate               = "date"
+	legacySeriesSearchScopeEpisodeParam = "episode_param"
+	legacySeriesSearchScopeEpisodeQuery = "episode_query"
+	legacySeriesSearchScopeSeasonParam  = "season_param"
+	legacySeriesSearchScopeSeasonQuery  = "season_query"
 )
 
 type Provider struct {
@@ -441,9 +441,142 @@ type Config struct {
 	// by AvailNZB are filtered out of playlist candidates.
 	AvailNZBFilterReportedBad *bool `json:"availnzb_filter_reported_bad,omitempty"`
 
+	// IndexerQuotaAware skips indexers whose daily API-hit or download quota is
+	// exhausted (preferring those with remaining headroom) instead of wasting
+	// attempts on them. If every indexer is exhausted, all are tried anyway.
+	// nil = enabled (default). See pkg/indexer aggregator.
+	IndexerQuotaAware *bool `json:"indexer_quota_aware,omitempty"`
+
+	// StreamLabelFormat controls how Stremio stream rows are labelled.
+	//   "detailed" (default/empty): enrich name + description with resolution,
+	//     quality, codec, HDR, audio, size, age, group, availability.
+	//   "minimal": legacy bare "StreamNZB" labels.
+	StreamLabelFormat string `json:"stream_label_format,omitempty"`
+
+	// Notifier configures proactive health alerts (provider/indexer/playback
+	// failures) to user-chosen channels. nil/disabled = no alerts.
+	Notifier *NotifierConfig `json:"notifier,omitempty"`
+
+	// Par2Enable turns on the last-resort PAR2 download-repair-serve fallback:
+	// when normal playback slots are exhausted and the release ships .par2
+	// recovery files, the fileset is downloaded to a scratch dir, repaired with
+	// the `par2` binary, and the recovered media is served. Opt-in (nil/false);
+	// when off the feature has zero runtime effect. See pkg/services/par2.
+	Par2Enable *bool `json:"par2_enable,omitempty"`
+	// Par2BinaryPath is the path to the `par2` binary (default "par2").
+	Par2BinaryPath string `json:"par2_binary_path,omitempty"`
+	// Par2WorkDir is the scratch base dir for repairs ("" = system temp).
+	Par2WorkDir string `json:"par2_work_dir,omitempty"`
+	// Par2MaxConcurrent caps simultaneous repairs (default 1).
+	Par2MaxConcurrent int `json:"par2_max_concurrent,omitempty"`
+	// Par2TimeoutMinutes bounds a single repair invocation (default 30).
+	Par2TimeoutMinutes int `json:"par2_timeout_minutes,omitempty"`
+	// Par2MaxBytes skips filesets whose on-disk total exceeds this many bytes
+	// (disk cap; 0 = unlimited).
+	Par2MaxBytes int64 `json:"par2_max_bytes,omitempty"`
+
 	LoadedPath string `json:"-"`
 
 	ResetLegacyStreamState bool `json:"-"`
+}
+
+// QuotaAwareEnabled reports whether quota-aware indexer rotation is on.
+// Defaults to true when unset.
+func (c *Config) QuotaAwareEnabled() bool {
+	if c == nil || c.IndexerQuotaAware == nil {
+		return true
+	}
+	return *c.IndexerQuotaAware
+}
+
+// EffectiveStreamLabelFormat returns the normalized stream label format,
+// defaulting to "detailed". Any value other than "minimal" maps to "detailed".
+func (c *Config) EffectiveStreamLabelFormat() string {
+	if c != nil && strings.EqualFold(strings.TrimSpace(c.StreamLabelFormat), "minimal") {
+		return "minimal"
+	}
+	return "detailed"
+}
+
+// NotifierConfig holds proactive-alert settings. Events is the master per-type
+// toggle ("provider_auth_fail" -> bool); Channels lists delivery destinations.
+type NotifierConfig struct {
+	Enabled            bool                    `json:"enabled,omitempty"`
+	Events             map[string]bool         `json:"events,omitempty"`
+	MinIntervalSeconds int                     `json:"min_interval_seconds,omitempty"`
+	Channels           []NotifierChannelConfig `json:"channels,omitempty"`
+}
+
+// NotifierChannelConfig is one delivery destination. Type is webhook|ntfy|
+// discord. Events lists which event types this channel wants; empty means every
+// master-enabled type. Header (webhook) and Priority (ntfy) are type-specific.
+type NotifierChannelConfig struct {
+	Name     string   `json:"name,omitempty"`
+	Type     string   `json:"type"`
+	URL      string   `json:"url"`
+	Header   string   `json:"header,omitempty"`
+	Priority string   `json:"priority,omitempty"`
+	Events   []string `json:"events,omitempty"`
+	Enabled  *bool    `json:"enabled,omitempty"`
+}
+
+// NotifierEnabled reports whether alerting is configured and turned on.
+func (c *Config) NotifierEnabled() bool {
+	return c != nil && c.Notifier != nil && c.Notifier.Enabled
+}
+
+const (
+	defaultPar2BinaryPath     = "par2"
+	defaultPar2MaxConcurrent  = 1
+	defaultPar2TimeoutMinutes = 30
+)
+
+// Par2Enabled reports whether the PAR2 repair fallback is turned on. Defaults to
+// false (opt-in).
+func (c *Config) Par2Enabled() bool {
+	return c != nil && c.Par2Enable != nil && *c.Par2Enable
+}
+
+// Par2Settings holds resolved PAR2 repair settings with defaults applied. It is a
+// plain DTO so the config package stays decoupled from pkg/services/par2; the
+// bootstrap layer maps it onto par2.Config.
+type Par2Settings struct {
+	Enabled        bool
+	BinaryPath     string
+	WorkDir        string
+	MaxConcurrent  int
+	TimeoutMinutes int
+	MaxBytes       int64
+}
+
+// Par2Config returns the effective PAR2 repair settings with defaults applied.
+func (c *Config) Par2Config() Par2Settings {
+	s := Par2Settings{}
+	if c == nil {
+		s.BinaryPath = defaultPar2BinaryPath
+		s.MaxConcurrent = defaultPar2MaxConcurrent
+		s.TimeoutMinutes = defaultPar2TimeoutMinutes
+		return s
+	}
+	s.Enabled = c.Par2Enabled()
+	s.BinaryPath = strings.TrimSpace(c.Par2BinaryPath)
+	if s.BinaryPath == "" {
+		s.BinaryPath = defaultPar2BinaryPath
+	}
+	s.WorkDir = strings.TrimSpace(c.Par2WorkDir)
+	s.MaxConcurrent = c.Par2MaxConcurrent
+	if s.MaxConcurrent < 1 {
+		s.MaxConcurrent = defaultPar2MaxConcurrent
+	}
+	s.TimeoutMinutes = c.Par2TimeoutMinutes
+	if s.TimeoutMinutes <= 0 {
+		s.TimeoutMinutes = defaultPar2TimeoutMinutes
+	}
+	s.MaxBytes = c.Par2MaxBytes
+	if s.MaxBytes < 0 {
+		s.MaxBytes = 0
+	}
+	return s
 }
 
 type StreamEntry struct {
@@ -1243,6 +1376,20 @@ func (c *Config) RedactForAPI() Config {
 		redactedIndexer.Password = ""
 		redactedIndexer.ProxyURL = RedactProxyURLForAPI(indexer.ProxyURL)
 		out.Indexers[i] = redactedIndexer
+	}
+	// Notifier channel URLs and headers carry secrets (Discord webhook tokens,
+	// ntfy auth, custom Authorization headers). Hide them from non-admin viewers
+	// while preserving the channel structure and event toggles.
+	if c.Notifier != nil {
+		redactedNotifier := *c.Notifier
+		redactedNotifier.Channels = make([]NotifierChannelConfig, len(c.Notifier.Channels))
+		for i, ch := range c.Notifier.Channels {
+			redactedChannel := ch
+			redactedChannel.URL = ""
+			redactedChannel.Header = ""
+			redactedNotifier.Channels[i] = redactedChannel
+		}
+		out.Notifier = &redactedNotifier
 	}
 	return out
 }

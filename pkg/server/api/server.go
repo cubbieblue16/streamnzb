@@ -318,6 +318,7 @@ func (s *Server) ReloadFromComponents(comp *app.Components, fullReload bool) {
 			TMDBClient:           comp.TMDBClient,
 			TVDBClient:           comp.TVDBClient,
 			StreamManager:        s.streamManager,
+			Par2:                 comp.Par2,
 		})
 	}
 }
@@ -413,6 +414,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("/api/logs/download", authMiddleware(http.HandlerFunc(s.handleDownloadLogs)))
 	mux.Handle("/api/nzb-attempts", authMiddleware(http.HandlerFunc(s.handleNZBAttempts)))
+	mux.Handle("/api/notifier/test", authMiddleware(http.HandlerFunc(s.handleNotifierTest)))
 
 	return mux
 }

@@ -1,7 +1,9 @@
 ARG TARGETARCH
 
 FROM alpine:latest
-RUN apk add --no-cache ca-certificates tzdata
+# par2cmdline provides the `par2` binary used by the optional (default-off) PAR2
+# download-repair-serve fallback (pkg/services/par2).
+RUN apk add --no-cache ca-certificates tzdata par2cmdline
 WORKDIR /app
 
 ARG TARGETARCH

@@ -364,11 +364,13 @@ func buildAIOStreamDescription(contentTitle, releaseTitle, indexerName string) s
 	return strings.Join(lines, "\n")
 }
 
-func buildStreamsFromPlaylist(list *playlistResult, key StreamSlotKey, streamName, baseURL string, showAll bool) []Stream {
+func buildStreamsFromPlaylist(list *playlistResult, key StreamSlotKey, streamName, baseURL, labelFormat string, showAll bool) []Stream {
 	nameLeft := streamName
 	if nameLeft == "" {
 		nameLeft = key.StreamID
 	}
+	detailed := labelFormat != "minimal"
+	now := time.Now()
 	useSlotPaths := len(list.SlotPaths) == len(list.Candidates)
 	var streams []Stream
 	if showAll {
@@ -389,6 +391,10 @@ func buildStreamsFromPlaylist(list *playlistResult, key StreamSlotKey, streamNam
 				contentTitle = list.Params.ContentTitle
 			}
 			desc := buildAIOStreamDescription(contentTitle, relTitle, indexerNameFromRelease(cand.Release))
+			if detailed {
+				sName = buildEnrichedStreamName(nameLeft, cand.Metadata, isAvail)
+				desc = buildEnrichedStreamDescription(cand.Metadata, cand.Release, isAvail, indexerNameFromRelease(cand.Release), now)
+			}
 			playPath := key.SlotPath(i)
 			if useSlotPaths {
 				playPath = list.SlotPaths[i]
@@ -444,10 +450,19 @@ func buildStreamsFromPlaylist(list *playlistResult, key StreamSlotKey, streamNam
 		if bingeLabel == "" {
 			bingeLabel = nameLeft
 		}
+		displayName := nameLeft
+		if detailed {
+			displayName = buildEnrichedStreamName(nameLeft, firstMeta, firstAvail)
+			d := buildEnrichedStreamDescription(firstMeta, firstRel, firstAvail, indexerNameFromRelease(firstRel), now)
+			if len(list.Candidates) > 1 {
+				d = d + "\n" + fmt.Sprintf("+%d more release(s)", len(list.Candidates)-1)
+			}
+			description = d
+		}
 		hints := streamBehaviorHints(nameLeft, key.StreamID, firstRel, &firstAvail, bingeLabel)
 		streams = append(streams, Stream{
 			FailoverID:    failoverId,
-			Name:          nameLeft,
+			Name:          displayName,
 			URL:           streamURL,
 			Description:   description,
 			BehaviorHints: hints,

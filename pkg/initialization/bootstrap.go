@@ -12,6 +12,8 @@ import (
 	"streamnzb/pkg/indexer"
 	"streamnzb/pkg/indexer/easynews"
 	"streamnzb/pkg/indexer/newznab"
+	"streamnzb/pkg/services/notifier"
+	"streamnzb/pkg/services/par2"
 	"streamnzb/pkg/usenet/nntp"
 	"streamnzb/pkg/usenet/pool"
 	"strings"
@@ -29,6 +31,24 @@ type InitializedComponents struct {
 	SegmentCacheBudget   *pool.SegmentCacheBudget
 	AvailNZBIndexerHosts map[string]string
 	IndexerCaps          map[string]*indexer.Caps
+	Notifier             *notifier.Notifier
+	Par2                 *par2.Service
+}
+
+// NewPar2Service builds the gated PAR2 repair service from config, applying
+// defaults and the minutes→Duration conversion. The returned service is a no-op
+// unless par2_enable is set. Single source of truth for the par2.Config mapping
+// (used by BuildComponents and config-only reloads).
+func NewPar2Service(cfg *config.Config) *par2.Service {
+	pc := cfg.Par2Config()
+	return par2.New(par2.Config{
+		Enabled:       pc.Enabled,
+		BinaryPath:    pc.BinaryPath,
+		WorkDir:       pc.WorkDir,
+		MaxConcurrent: pc.MaxConcurrent,
+		Timeout:       time.Duration(pc.TimeoutMinutes) * time.Minute,
+		MaxBytes:      pc.MaxBytes,
+	})
 }
 
 func WaitForInputAndExit(err error) {
@@ -167,6 +187,7 @@ func BuildComponents(cfg *config.Config) (*InitializedComponents, error) {
 	}
 
 	aggregator := indexer.NewAggregator(indexers...)
+	aggregator.QuotaAware = cfg.QuotaAwareEnabled()
 
 	indexerCaps := make(map[string]*indexer.Caps)
 	var capsMu sync.Mutex
@@ -302,6 +323,28 @@ func BuildComponents(cfg *config.Config) (*InitializedComponents, error) {
 		}
 	}
 
+	// Proactive alerting. nil when disabled/unconfigured; the global Emit then
+	// no-ops so event sites stay decoupled from the notifier's lifecycle.
+	notif := notifier.FromConfig(cfg.Notifier, nil, nil)
+	if notif != nil {
+		notif.Start()
+		logger.Info("Notifier initialized", "channels", len(notif.ChannelNames()))
+	}
+	notifier.SetGlobal(notif)
+
+	// Last-resort PAR2 download-repair-serve. Always constructed so the playback
+	// path can hold a non-nil handle; Enabled() gates all work and is false
+	// unless par2_enable is set, so the default build has zero runtime effect.
+	par2Svc := NewPar2Service(cfg)
+	if par2Svc.Enabled() {
+		pc := cfg.Par2Config()
+		logger.Info("PAR2 repair fallback enabled",
+			"binary", pc.BinaryPath,
+			"max_concurrent", pc.MaxConcurrent,
+			"timeout_min", pc.TimeoutMinutes,
+			"max_bytes", pc.MaxBytes)
+	}
+
 	return &InitializedComponents{
 		Config:               cfg,
 		Indexer:              aggregator,
@@ -312,5 +355,7 @@ func BuildComponents(cfg *config.Config) (*InitializedComponents, error) {
 		SegmentCacheBudget:   segmentCacheBudget,
 		AvailNZBIndexerHosts: availNzbHosts,
 		IndexerCaps:          indexerCaps,
+		Notifier:             notif,
+		Par2:                 par2Svc,
 	}, nil
 }

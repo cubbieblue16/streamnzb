@@ -15,6 +15,67 @@ import (
 
 type Aggregator struct {
 	Indexers []Indexer
+	// QuotaAware, when true, drops indexers whose daily API-hit (search) or
+	// download quota is exhausted, preferring those with remaining headroom.
+	// If every indexer is exhausted, all are tried anyway (graceful fallback).
+	QuotaAware bool
+}
+
+// hasAPIHeadroom reports whether an indexer can still serve searches today.
+// A non-positive limit means unknown/unlimited, which counts as headroom.
+func hasAPIHeadroom(idx Indexer) bool {
+	u := idx.GetUsage()
+	if u.APIHitsLimit <= 0 {
+		return true
+	}
+	return u.APIHitsRemaining > 0
+}
+
+// hasDownloadHeadroom reports whether an indexer can still serve grabs today.
+func hasDownloadHeadroom(idx Indexer) bool {
+	u := idx.GetUsage()
+	if u.DownloadsLimit <= 0 {
+		return true
+	}
+	return u.DownloadsRemaining > 0
+}
+
+// eligibleIndexers filters out indexers whose relevant quota (search vs.
+// download) is exhausted, preserving the configured priority order among those
+// with headroom. When quota awareness is off, only one indexer is configured,
+// or every indexer is exhausted, the full list is returned unchanged so we
+// never end up with zero indexers to try.
+func eligibleIndexers(indexers []Indexer, quotaAware, forDownload bool) []Indexer {
+	if !quotaAware || len(indexers) <= 1 {
+		return indexers
+	}
+	hasHeadroom := hasAPIHeadroom
+	if forDownload {
+		hasHeadroom = hasDownloadHeadroom
+	}
+	eligible := make([]Indexer, 0, len(indexers))
+	for _, idx := range indexers {
+		if hasHeadroom(idx) {
+			eligible = append(eligible, idx)
+		}
+	}
+	if len(eligible) == 0 {
+		return indexers
+	}
+	if len(eligible) < len(indexers) {
+		skipped := make([]string, 0, len(indexers)-len(eligible))
+		for _, idx := range indexers {
+			if !hasHeadroom(idx) {
+				skipped = append(skipped, idx.Name())
+			}
+		}
+		logger.Debug("Quota-aware rotation skipped exhausted indexers",
+			"skipped", strings.Join(skipped, ","),
+			"for_download", forDownload,
+			"eligible", len(eligible),
+		)
+	}
+	return eligible
 }
 
 func (a *Aggregator) Name() string {
@@ -75,8 +136,9 @@ func (a *Aggregator) DownloadNZB(ctx context.Context, nzbURL string) ([]byte, er
 	if len(a.Indexers) == 0 {
 		return nil, fmt.Errorf("no indexers configured")
 	}
+	indexers := eligibleIndexers(a.Indexers, a.QuotaAware, true)
 	var lastErr error
-	for _, idx := range a.Indexers {
+	for _, idx := range indexers {
 		data, err := idx.DownloadNZB(ctx, nzbURL)
 		if err == nil {
 			return data, nil
@@ -124,10 +186,11 @@ func (a *Aggregator) Search(req SearchRequest) (*SearchResponse, error) {
 }
 
 func (a *Aggregator) searchCombined(req SearchRequest) (*SearchResponse, error) {
-	resultsChan := make(chan []Item, len(a.Indexers))
+	indexers := eligibleIndexers(a.Indexers, a.QuotaAware, false)
+	resultsChan := make(chan []Item, len(indexers))
 	var wg sync.WaitGroup
 
-	for _, idx := range a.Indexers {
+	for _, idx := range indexers {
 		wg.Add(1)
 		go func(indexer Indexer, r SearchRequest) {
 			defer wg.Done()
@@ -203,14 +266,15 @@ func (a *Aggregator) searchCombined(req SearchRequest) (*SearchResponse, error) 
 }
 
 func (a *Aggregator) searchWithFailover(req SearchRequest) (*SearchResponse, error) {
+	indexers := eligibleIndexers(a.Indexers, a.QuotaAware, false)
 	type failoverResult struct {
 		index int
 		items []Item
 		err   error
 	}
 
-	results := make(chan failoverResult, len(a.Indexers))
-	for i, idx := range a.Indexers {
+	results := make(chan failoverResult, len(indexers))
+	for i, idx := range indexers {
 		go func(index int, idx Indexer) {
 			items, err := searchItemsForIndexer(idx, req)
 			results <- failoverResult{
@@ -221,21 +285,21 @@ func (a *Aggregator) searchWithFailover(req SearchRequest) (*SearchResponse, err
 		}(i, idx)
 	}
 
-	pending := len(a.Indexers)
-	done := make([]bool, len(a.Indexers))
-	itemsByIndexer := make([][]Item, len(a.Indexers))
+	pending := len(indexers)
+	done := make([]bool, len(indexers))
+	itemsByIndexer := make([][]Item, len(indexers))
 
 	for pending > 0 {
 		result := <-results
 		pending--
 		done[result.index] = true
 		if result.err != nil {
-			logger.Warn("Indexer search failed", "indexer", a.Indexers[result.index].Name(), "err", result.err)
+			logger.Warn("Indexer search failed", "indexer", indexers[result.index].Name(), "err", result.err)
 		} else {
 			itemsByIndexer[result.index] = result.items
 		}
 
-		for i := 0; i < len(a.Indexers); i++ {
+		for i := 0; i < len(indexers); i++ {
 			if !done[i] {
 				break
 			}

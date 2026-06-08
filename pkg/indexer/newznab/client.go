@@ -19,6 +19,7 @@ import (
 	"streamnzb/pkg/core/logger"
 	"streamnzb/pkg/indexer"
 	"streamnzb/pkg/indexer/httpproxy"
+	"streamnzb/pkg/services/notifier"
 )
 
 type Client struct {
@@ -265,8 +266,11 @@ func (c *Client) checkAPILimit() error {
 	c.refreshUsageFromManager()
 
 	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if c.apiLimit > 0 && c.apiRemaining <= 0 {
+	limit := c.apiLimit
+	exhausted := c.apiLimit > 0 && c.apiRemaining <= 0
+	c.mu.RUnlock()
+	if exhausted {
+		c.emitQuotaAlert("api", limit)
 		return fmt.Errorf("API limit reached for %s", c.Name())
 	}
 	return nil
@@ -276,11 +280,32 @@ func (c *Client) checkDownloadLimit() error {
 	c.refreshUsageFromManager()
 
 	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if c.downloadLimit > 0 && c.downloadRemaining <= 0 {
+	limit := c.downloadLimit
+	exhausted := c.downloadLimit > 0 && c.downloadRemaining <= 0
+	c.mu.RUnlock()
+	if exhausted {
+		c.emitQuotaAlert("download", limit)
 		return fmt.Errorf("download limit reached for %s", c.Name())
 	}
 	return nil
+}
+
+// emitQuotaAlert raises an indexer_quota alert when this indexer's daily API or
+// download allotment is exhausted. kind is "api" or "download". Global Emit is
+// nil-safe and rate-limits by title, so repeated checks against an exhausted
+// indexer collapse to one alert per interval rather than one per skipped search.
+func (c *Client) emitQuotaAlert(kind string, limit int) {
+	name := c.Name()
+	notifier.Emit(notifier.Event{
+		Type:    notifier.EventIndexerQuota,
+		Title:   "Indexer quota exhausted: " + name,
+		Message: "Indexer " + name + " has reached its daily " + kind + " quota.",
+		Fields: map[string]string{
+			"indexer": name,
+			"kind":    kind,
+			"limit":   strconv.Itoa(limit),
+		},
+	})
 }
 
 func (c *Client) updateUsageFromHeaders(h http.Header) {
