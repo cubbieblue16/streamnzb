@@ -18,7 +18,10 @@ const CARD_FIELDS = {
   playback: ['playback_startup_timeout_seconds', 'failover_fast_mode'],
   availnzb: ['availnzb_mode', 'availnzb_filter_reported_bad'],
   metadata: ['tmdb_api_key', 'tvdb_api_key'],
+  par2: ['par2_enable', 'par2_max_bytes', 'par2_timeout_minutes', 'par2_max_concurrent', 'par2_binary_path', 'par2_work_dir'],
 }
+
+const BYTES_PER_GB = 1024 ** 3
 
 function pickInitialValues(values = {}) {
   const parsedRetentionDays = values.nzb_history_retention_days == null
@@ -39,6 +42,12 @@ function pickInitialValues(values = {}) {
     availnzb_filter_reported_bad: values.availnzb_filter_reported_bad === true,
     tmdb_api_key: values.tmdb_api_key ?? '',
     tvdb_api_key: values.tvdb_api_key ?? '',
+    par2_enable: values.par2_enable === true,
+    par2_max_bytes: Number(values.par2_max_bytes ?? 0) || 0,
+    par2_timeout_minutes: Number(values.par2_timeout_minutes ?? 30) || 30,
+    par2_max_concurrent: Number(values.par2_max_concurrent ?? 1) || 1,
+    par2_binary_path: values.par2_binary_path ?? '',
+    par2_work_dir: values.par2_work_dir ?? '',
   }
 }
 
@@ -83,6 +92,7 @@ export const AdvancedSettingsSection = forwardRef(function AdvancedSettingsSecti
   const { control, handleSubmit, reset, getValues, formState } = form
   const watchedValues = useWatch({ control })
   const availNZBModeEnabled = normalizeAvailNZBMode(watchedValues?.availnzb_mode) === 'on'
+  const par2Enabled = watchedValues?.par2_enable === true
 
   useEffect(() => {
     const currentValues = pickInitialValues(watchedValues)
@@ -447,6 +457,137 @@ export const AdvancedSettingsSection = forwardRef(function AdvancedSettingsSecti
                     <FormControl><div className="w-full xl:max-w-3xl"><PasswordInput className={fieldClassName('tvdb_api_key', 'h-9 w-full font-mono text-xs')} {...field} value={field.value || ''} /></div></FormControl>
                   </div>
                   <FormDescription className="mt-3">Used primarily for series metadata ID resolution. When available, StreamNZB can resolve TVDB IDs directly before falling back to TMDB-based lookup.</FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )} />
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0 flex-1 max-w-[40rem] space-y-0.5">
+                <CardTitle>PAR2 Repair</CardTitle>
+                <CardDescription>Last-resort recovery. When every normal playback slot is exhausted and the release ships .par2 recovery files, StreamNZB downloads the full fileset, repairs it with the par2 binary, and serves the rebuilt media. Off by default; when off the repair path is never entered and playback is unchanged.</CardDescription>
+              </div>
+              <div className="shrink-0">{renderSaveButton('par2')}</div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="rounded-md border border-border/60">
+              <FormField control={control} name="par2_enable" render={({ field }) => (
+                <FormItem className="rounded-none border-0 p-3">
+                  <div className={stackedFieldRowClass}>
+                    <div className="sm:flex-1">
+                      <FormLabel className={labelClass}>Enable PAR2 repair fallback</FormLabel>
+                    </div>
+                    <FormControl>
+                      <Switch
+                        checked={field.value === true}
+                        onCheckedChange={field.onChange}
+                        className={showUnsavedHighlights && formState.dirtyFields?.par2_enable ? 'ring-2 ring-destructive ring-offset-2 ring-offset-background' : ''}
+                      />
+                    </FormControl>
+                  </div>
+                  <FormDescription className="mt-3">Master switch. The settings below only take effect while this is on. Repair adds latency only on the fallback path, after normal playback has failed.</FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )} />
+              <FormField control={control} name="par2_max_bytes" render={({ field }) => {
+                const gb = Number(field.value) > 0 ? Math.round((Number(field.value) / BYTES_PER_GB) * 100) / 100 : 0
+                return (
+                  <FormItem className="relative rounded-none border-0 p-3">
+                    <div className="absolute left-3 right-3 top-0 border-t border-border/60" />
+                    <div className={stackedFieldRowClass}>
+                      <FormLabel className={cn(labelClass, 'sm:flex-1')}>Max fileset size (GB, 0 = unlimited)</FormLabel>
+                      <FormControl>
+                        <Input
+                          type="number" min={0} step={1} disabled={!par2Enabled}
+                          className={fieldClassName('par2_max_bytes', `h-9 ${controlMediumClass}`)}
+                          value={gb}
+                          onChange={e => { const v = Number(e.target.value); field.onChange(!Number.isFinite(v) || v <= 0 ? 0 : Math.round(v * BYTES_PER_GB)) }}
+                        />
+                      </FormControl>
+                    </div>
+                    <FormDescription className="mt-3">Skip repair for filesets whose total on-disk size exceeds this, so the fallback path never triggers a huge download. 0 means no cap.</FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )
+              }} />
+              <FormField control={control} name="par2_timeout_minutes" render={({ field }) => (
+                <FormItem className="relative rounded-none border-0 p-3">
+                  <div className="absolute left-3 right-3 top-0 border-t border-border/60" />
+                  <div className={stackedFieldRowClass}>
+                    <FormLabel className={cn(labelClass, 'sm:flex-1')}>Repair timeout (minutes)</FormLabel>
+                    <FormControl>
+                      <Input
+                        type="number" min={1} max={720} disabled={!par2Enabled}
+                        className={fieldClassName('par2_timeout_minutes', `h-9 ${controlMediumClass}`)}
+                        {...field} value={field.value ?? ''}
+                        onChange={e => { const v = e.target.value; const n = Number(v); field.onChange(v === '' ? 30 : Math.min(720, Math.max(1, Number.isNaN(n) ? 30 : n))) }}
+                      />
+                    </FormControl>
+                  </div>
+                  <FormDescription className="mt-3">Hard limit on a single par2 repair run before it is aborted and the playback request fails cleanly.</FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )} />
+              <FormField control={control} name="par2_max_concurrent" render={({ field }) => (
+                <FormItem className="relative rounded-none border-0 p-3">
+                  <div className="absolute left-3 right-3 top-0 border-t border-border/60" />
+                  <div className={stackedFieldRowClass}>
+                    <FormLabel className={cn(labelClass, 'sm:flex-1')}>Max concurrent repairs</FormLabel>
+                    <FormControl>
+                      <Input
+                        type="number" min={1} max={8} disabled={!par2Enabled}
+                        className={fieldClassName('par2_max_concurrent', `h-9 ${controlMediumClass}`)}
+                        {...field} value={field.value ?? ''}
+                        onChange={e => { const v = e.target.value; const n = Number(v); field.onChange(v === '' ? 1 : Math.min(8, Math.max(1, Number.isNaN(n) ? 1 : n))) }}
+                      />
+                    </FormControl>
+                  </div>
+                  <FormDescription className="mt-3">How many repairs may run at once. Each is CPU- and disk-heavy; 1 is recommended unless the host has spare capacity.</FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )} />
+              <FormField control={control} name="par2_binary_path" render={({ field }) => (
+                <FormItem className="relative rounded-none border-0 p-3">
+                  <div className="absolute left-3 right-3 top-0 border-t border-border/60" />
+                  <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:gap-4">
+                    <FormLabel className="min-w-0 text-sm font-medium xl:flex-1">par2 binary path</FormLabel>
+                    <FormControl>
+                      <div className="w-full xl:max-w-md">
+                        <Input
+                          disabled={!par2Enabled}
+                          className={fieldClassName('par2_binary_path', 'h-9 w-full font-mono text-xs')}
+                          placeholder="par2"
+                          {...field} value={field.value ?? ''}
+                        />
+                      </div>
+                    </FormControl>
+                  </div>
+                  <FormDescription className="mt-3">Path to the par2 executable. Leave as "par2" to use the copy bundled in the container.</FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )} />
+              <FormField control={control} name="par2_work_dir" render={({ field }) => (
+                <FormItem className="relative rounded-none border-0 p-3">
+                  <div className="absolute left-3 right-3 top-0 border-t border-border/60" />
+                  <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:gap-4">
+                    <FormLabel className="min-w-0 text-sm font-medium xl:flex-1">Scratch directory</FormLabel>
+                    <FormControl>
+                      <div className="w-full xl:max-w-md">
+                        <Input
+                          disabled={!par2Enabled}
+                          className={fieldClassName('par2_work_dir', 'h-9 w-full font-mono text-xs')}
+                          placeholder="(system temp)"
+                          {...field} value={field.value ?? ''}
+                        />
+                      </div>
+                    </FormControl>
+                  </div>
+                  <FormDescription className="mt-3">Where filesets are downloaded and repaired. Blank uses the system temp dir. Needs free space for the full release plus recovery data.</FormDescription>
                   <FormMessage />
                 </FormItem>
               )} />

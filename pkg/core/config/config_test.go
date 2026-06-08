@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
@@ -578,5 +579,69 @@ func TestPar2ConfigOverridesAndClamps(t *testing.T) {
 	}
 	if s.MaxBytes != 0 {
 		t.Errorf("MaxBytes = %d, want clamped 0", s.MaxBytes)
+	}
+}
+
+// TestPar2PatchMergeFromUIKeys locks the contract the Advanced Settings PAR2
+// card depends on: the JSON keys the UI sends must patch-merge onto an existing
+// Config (via the same marshal-then-overlay merge the config PUT handler uses),
+// setting the par2_* fields while leaving unrelated config untouched. A renamed
+// or mistyped json tag would break the panel silently; this catches it.
+func TestPar2PatchMergeFromUIKeys(t *testing.T) {
+	base := &Config{LogLevel: "INFO", TMDBAPIKey: "keep-me"}
+
+	// Replicate the config PUT handler's merge: serialize the current config,
+	// then overlay the partial body the frontend sends for the PAR2 card.
+	baseJSON, err := json.Marshal(base)
+	if err != nil {
+		t.Fatalf("marshal base: %v", err)
+	}
+	var merged Config
+	if err := json.Unmarshal(baseJSON, &merged); err != nil {
+		t.Fatalf("unmarshal base: %v", err)
+	}
+	patch := []byte(`{
+		"par2_enable": true,
+		"par2_max_bytes": 53687091200,
+		"par2_timeout_minutes": 45,
+		"par2_max_concurrent": 2,
+		"par2_binary_path": "/usr/bin/par2",
+		"par2_work_dir": "/scratch"
+	}`)
+	if err := json.Unmarshal(patch, &merged); err != nil {
+		t.Fatalf("unmarshal patch: %v", err)
+	}
+
+	// Unrelated fields survive the patch (merge, not replace).
+	if merged.LogLevel != "INFO" || merged.TMDBAPIKey != "keep-me" {
+		t.Errorf("patch clobbered unrelated fields: LogLevel=%q TMDBAPIKey=%q", merged.LogLevel, merged.TMDBAPIKey)
+	}
+	if !merged.Par2Enabled() {
+		t.Fatal("Par2Enabled() = false after patch, want true")
+	}
+	s := merged.Par2Config()
+	if s.MaxBytes != 53687091200 {
+		t.Errorf("MaxBytes = %d, want 53687091200", s.MaxBytes)
+	}
+	if s.TimeoutMinutes != 45 {
+		t.Errorf("TimeoutMinutes = %d, want 45", s.TimeoutMinutes)
+	}
+	if s.MaxConcurrent != 2 {
+		t.Errorf("MaxConcurrent = %d, want 2", s.MaxConcurrent)
+	}
+	if s.BinaryPath != "/usr/bin/par2" {
+		t.Errorf("BinaryPath = %q, want /usr/bin/par2", s.BinaryPath)
+	}
+	if s.WorkDir != "/scratch" {
+		t.Errorf("WorkDir = %q, want /scratch", s.WorkDir)
+	}
+
+	// Toggling off via the UI key persists false (not omitted), so it actually
+	// disables — matching the Switch in the panel.
+	if err := json.Unmarshal([]byte(`{"par2_enable": false}`), &merged); err != nil {
+		t.Fatalf("unmarshal disable patch: %v", err)
+	}
+	if merged.Par2Enabled() {
+		t.Error("Par2Enabled() = true after disable patch, want false")
 	}
 }
