@@ -30,6 +30,25 @@ const URL_PLACEHOLDER = {
   discord: 'https://discord.com/api/webhooks/...',
 }
 
+// ntfy.sh is a free public server, so there is no sensible static default URL to
+// pre-fill: every install sharing one topic would leak each other's alerts on a
+// public, unauthenticated channel. Instead we mint a unique random topic per
+// channel the first time ntfy is selected, so each self-hoster gets their own
+// "https://ntfy.sh/streamnzb-<random>" to subscribe to and monitor. Security for
+// ntfy.sh topics comes from the name being unguessable.
+function randomNtfyTopic() {
+  let suffix = ''
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    const bytes = new Uint8Array(8)
+    crypto.getRandomValues(bytes)
+    suffix = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+  } else {
+    // Fallback for environments without WebCrypto; still per-call unique enough.
+    suffix = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e9).toString(36)}`
+  }
+  return `https://ntfy.sh/streamnzb-${suffix}`
+}
+
 function normalizeEvents(events) {
   const out = {}
   for (const ev of EVENT_TYPES) {
@@ -85,6 +104,22 @@ export function NotificationsSection({ initialValues, isSaving, onPersist }) {
 
   const updateChannel = (index, patch) => {
     setChannels((prev) => prev.map((c, i) => (i === index ? { ...c, ...patch } : c)))
+  }
+
+  const changeChannelType = (index, nextType) => {
+    setChannels((prev) =>
+      prev.map((c, i) => {
+        if (i !== index) return c
+        const patch = { type: nextType }
+        // Pre-populate a unique ntfy topic when switching to ntfy with no URL yet,
+        // so self-hosters get their own channel to subscribe to instead of a blank
+        // field or a shared default.
+        if (nextType === 'ntfy' && !c.url.trim()) {
+          patch.url = randomNtfyTopic()
+        }
+        return { ...c, ...patch }
+      })
+    )
   }
 
   const toggleChannelEvent = (index, eventId) => {
@@ -283,7 +318,7 @@ export function NotificationsSection({ initialValues, isSaving, onPersist }) {
                     <select
                       className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                       value={channel.type}
-                      onChange={(e) => updateChannel(index, { type: e.target.value })}
+                      onChange={(e) => changeChannelType(index, e.target.value)}
                     >
                       {CHANNEL_TYPES.map((t) => (
                         <option key={t.id} value={t.id}>{t.label}</option>
