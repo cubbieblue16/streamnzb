@@ -12,13 +12,17 @@ var (
 
 // SetGlobal installs n as the process-wide notifier and stops any previous one.
 // Passing nil disables global Emit (it becomes a no-op).
+//
+// The old notifier is stopped asynchronously: Stop drains the queue, and a
+// single wedged webhook send can block for the full send timeout. Callers
+// (App.Reload holds its mutex through this call) must not stall on that drain.
 func SetGlobal(n *Notifier) {
 	globalMu.Lock()
 	old := global
 	global = n
 	globalMu.Unlock()
 	if old != nil && old != n {
-		old.Stop()
+		go old.Stop()
 	}
 }
 

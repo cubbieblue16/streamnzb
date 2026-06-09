@@ -205,6 +205,59 @@ func (b *blockingChannel) Send(ctx context.Context, ev Event) error {
 	return nil
 }
 
+func TestEmitAfterStopIsSafeNoop(t *testing.T) {
+	ch := &fakeChannel{name: "c"}
+	n := New(Options{
+		Enabled:  true,
+		Events:   map[EventType]bool{EventPlaybackFailure: true},
+		Channels: []Channel{ch},
+	})
+	n.Start()
+	n.Stop()
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Emit after Stop panicked: %v", r)
+		}
+	}()
+	n.Emit(Event{Type: EventPlaybackFailure, Title: "late"})
+}
+
+func TestConcurrentEmitAndStopIsSafe(t *testing.T) {
+	// Emitters hold a stale notifier pointer while Stop closes the queue —
+	// exactly what happens when a config reload swaps the global notifier while
+	// playback goroutines are emitting. Must neither panic nor race.
+	for i := 0; i < 25; i++ {
+		ch := &fakeChannel{name: "c"}
+		n := New(Options{
+			Enabled:  true,
+			Events:   map[EventType]bool{EventPlaybackFailure: true},
+			Channels: []Channel{ch},
+		})
+		n.Start()
+
+		var wg sync.WaitGroup
+		stop := make(chan struct{})
+		for g := 0; g < 4; g++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+						n.Emit(Event{Type: EventPlaybackFailure, Title: "hot"})
+					}
+				}
+			}()
+		}
+		n.Stop()
+		close(stop)
+		wg.Wait()
+	}
+}
+
 func TestTestChannelBypassesTogglesAndRateLimit(t *testing.T) {
 	ch := &fakeChannel{name: "target"}
 	n := New(Options{

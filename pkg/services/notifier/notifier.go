@@ -86,8 +86,13 @@ type Notifier struct {
 	minInterval time.Duration
 	channels    []Channel
 
-	queue   chan Event
+	queue chan Event
+	// stateMu serializes Start/Stop against Emit's queue send: Emit may run on a
+	// stale pointer after a config reload swapped the global notifier, and a send
+	// racing the queue close is a process-crashing panic.
+	stateMu sync.RWMutex
 	started bool
+	stopped bool
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
 
@@ -145,9 +150,15 @@ func (n *Notifier) Enabled() bool {
 	return n != nil && n.enabled && len(n.channels) > 0
 }
 
-// Start launches the worker goroutine. Safe to call once.
+// Start launches the worker goroutine. Idempotent; a stopped notifier cannot
+// be restarted (its queue is closed).
 func (n *Notifier) Start() {
-	if n == nil || n.started {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	if n.started || n.stopped {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -157,13 +168,23 @@ func (n *Notifier) Start() {
 	go n.run(ctx)
 }
 
-// Stop drains in-flight work and stops the worker. Safe to call multiple times.
+// Stop drains in-flight work and stops the worker. Safe to call multiple times
+// and concurrently with Emit.
 func (n *Notifier) Stop() {
-	if n == nil || !n.started {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	if !n.started {
+		n.stateMu.Unlock()
 		return
 	}
 	n.started = false
+	n.stopped = true
 	close(n.queue)
+	n.stateMu.Unlock()
+	// Drain outside the lock so late Emit calls return immediately (they see
+	// started=false) instead of queueing behind the drain.
 	n.wg.Wait()
 	if n.cancel != nil {
 		n.cancel()
@@ -181,6 +202,14 @@ func (n *Notifier) Emit(ev Event) {
 	}
 	if ev.Time.IsZero() {
 		ev.Time = n.now()
+	}
+	// Hold the read lock across the send: it excludes Stop's queue close, so a
+	// caller with a stale pointer (config reload swapped the global) drops the
+	// event instead of panicking on a closed channel.
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	if !n.started {
+		return
 	}
 	select {
 	case n.queue <- ev:
