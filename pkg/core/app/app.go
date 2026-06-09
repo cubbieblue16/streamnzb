@@ -16,6 +16,7 @@ import (
 	"streamnzb/pkg/services/availnzb"
 	"streamnzb/pkg/services/metadata/tmdb"
 	"streamnzb/pkg/services/metadata/tvdb"
+	"streamnzb/pkg/services/notifier"
 	"streamnzb/pkg/services/par2"
 	"streamnzb/pkg/usenet/nntp"
 	"streamnzb/pkg/usenet/pool"
@@ -218,6 +219,18 @@ func (a *App) Reload(newCfg *config.Config) (*Components, bool, error) {
 		// Rebuild the PAR2 service so toggling par2_* (a config-only change) takes
 		// effect without a provider/indexer restart.
 		comp.Par2 = initialization.NewPar2Service(newCfg)
+		// Rebuild the notifier for the same reason: alert toggles saved in the UI
+		// are a config-only change, and the global notifier otherwise keeps the
+		// event/channel set from startup until the next full rebuild or restart.
+		// SetGlobal stops the previous instance; nil disables Emit.
+		notif := notifier.FromConfig(newCfg.Notifier, nil, nil)
+		if notif != nil {
+			notif.Start()
+			logger.Info("Reload: notifier rebuilt", "channels", len(notif.ChannelNames()))
+		} else {
+			logger.Info("Reload: notifier disabled or unconfigured")
+		}
+		notifier.SetGlobal(notif)
 		a.components = &comp
 		return &comp, false, nil
 
