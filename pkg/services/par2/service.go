@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"streamnzb/pkg/core/logger"
@@ -57,8 +58,9 @@ type Config struct {
 // Service runs gated, concurrency-limited PAR2 repairs. A nil *Service is a safe
 // no-op (Enabled reports false; Repair returns ErrDisabled).
 type Service struct {
-	cfg Config
-	sem chan struct{}
+	cfg   Config
+	sem   chan struct{}
+	group *par2RepairCoordinator
 }
 
 // New builds a Service, applying defaults. When cfg.Enabled is false the service
@@ -78,8 +80,9 @@ func New(cfg Config) *Service {
 		cfg.MaxBytes = 0
 	}
 	return &Service{
-		cfg: cfg,
-		sem: make(chan struct{}, cfg.MaxConcurrent),
+		cfg:   cfg,
+		sem:   make(chan struct{}, cfg.MaxConcurrent),
+		group: newPar2RepairCoordinator(),
 	}
 }
 
@@ -279,6 +282,135 @@ func (s *Service) DownloadRepairLocate(ctx context.Context, label string, dl Dow
 
 	success = true
 	return playablePath, rm, nil
+}
+
+// DownloadRepairLocateShared coalesces concurrent last-resort repairs for the
+// same key. The underlying DownloadRepairLocate (the expensive multi-GB fileset
+// download plus par2 repair) runs at most once while any caller is still
+// streaming the result; every caller receives the same playable path with its
+// own cleanup. The shared scratch dir is removed only when the last caller's
+// cleanup runs. Once all callers release, the key is forgotten so a later
+// request repairs fresh rather than reusing a removed scratch dir.
+//
+// This is the entry point the playback fallback must use: without it, each of
+// Stremio's concurrent re-requests for the same broken release would download
+// the full fileset independently (the par2 concurrency semaphore only gates the
+// repair exec, not the download).
+func (s *Service) DownloadRepairLocateShared(ctx context.Context, key string, dl Downloader) (string, func(), error) {
+	if !s.Enabled() {
+		return "", noopCleanup, ErrDisabled
+	}
+	if s.group == nil { // defensive: a hand-constructed Service{} has no coordinator
+		return s.DownloadRepairLocate(ctx, key, dl)
+	}
+	return s.group.run(key, func() (string, func(), error) {
+		return s.DownloadRepairLocate(ctx, key, dl)
+	})
+}
+
+// par2RepairCoordinator coalesces concurrent repairs by key and reference-counts
+// the shared scratch dir so it is removed only once every consumer has released.
+type par2RepairCoordinator struct {
+	mu       sync.Mutex
+	inflight map[string]*par2RepairEntry
+}
+
+// par2RepairEntry is the shared state for one coalesced repair. done is closed
+// when the leader's repair finishes; path/rm/err hold its result; refs counts
+// consumers currently holding the scratch dir.
+type par2RepairEntry struct {
+	coord   *par2RepairCoordinator
+	key     string
+	done    chan struct{}
+	path    string
+	rm      func()
+	err     error
+	refs    int
+	removed bool
+}
+
+func newPar2RepairCoordinator() *par2RepairCoordinator {
+	return &par2RepairCoordinator{inflight: make(map[string]*par2RepairEntry)}
+}
+
+// run executes doRepair at most once per concurrent group sharing key. doRepair
+// returns (playablePath, scratchRemover, err). On success every caller gets the
+// shared path and a distinct, once-guarded release it must invoke when done; the
+// scratch dir is removed when the final release runs. On error each in-flight
+// caller receives the same error and the key is forgotten so the next call
+// retries.
+func (c *par2RepairCoordinator) run(key string, doRepair func() (string, func(), error)) (string, func(), error) {
+	for {
+		c.mu.Lock()
+		if e := c.inflight[key]; e != nil {
+			c.mu.Unlock()
+			<-e.done
+			c.mu.Lock()
+			if e.err != nil {
+				c.mu.Unlock()
+				return "", noopCleanup, e.err
+			}
+			if e.removed {
+				// Every prior consumer released before we attached; start over
+				// as a fresh leader rather than reuse a removed scratch dir.
+				c.mu.Unlock()
+				continue
+			}
+			e.refs++
+			path, rel := e.path, e.releaseFunc()
+			c.mu.Unlock()
+			return path, rel, nil
+		}
+
+		// No entry yet: become the leader and run the repair.
+		e := &par2RepairEntry{coord: c, key: key, done: make(chan struct{})}
+		c.inflight[key] = e
+		c.mu.Unlock()
+
+		path, rm, err := doRepair()
+
+		c.mu.Lock()
+		e.path, e.rm, e.err = path, rm, err
+		if err != nil {
+			if c.inflight[key] == e {
+				delete(c.inflight, key)
+			}
+			close(e.done)
+			c.mu.Unlock()
+			return "", noopCleanup, err
+		}
+		e.refs++ // the leader is the first consumer
+		close(e.done)
+		rel := e.releaseFunc()
+		c.mu.Unlock()
+		return path, rel, nil
+	}
+}
+
+// releaseFunc builds a once-guarded release for a single consumer. The caller
+// must hold c.mu (it only constructs the closure; the work happens in release).
+func (e *par2RepairEntry) releaseFunc() func() {
+	var once sync.Once
+	return func() { once.Do(e.release) }
+}
+
+// release drops one consumer's reference; when the last reference is gone it
+// removes the scratch dir and forgets the key.
+func (e *par2RepairEntry) release() {
+	c := e.coord
+	c.mu.Lock()
+	e.refs--
+	remove := e.refs <= 0 && !e.removed
+	if remove {
+		e.removed = true
+		if c.inflight[e.key] == e {
+			delete(c.inflight, e.key)
+		}
+	}
+	c.mu.Unlock()
+	if remove && e.rm != nil {
+		e.rm()
+	}
 }
 
 // --- helpers ---

@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -424,11 +425,170 @@ func TestSanitizeLabel(t *testing.T) {
 	}
 }
 
+// TestDownloadRepairLocateSharedCoalescesConcurrentCallers verifies the
+// last-resort repair coordinator: when many playback requests for the same
+// release exhaust their slots at once, only ONE multi-GB fileset download +
+// repair runs; every caller receives the same playable path with its own
+// cleanup; and the shared scratch dir survives until the last caller closes.
+func TestDownloadRepairLocateSharedCoalescesConcurrentCallers(t *testing.T) {
+	skipNoShell(t)
+	bin := writeFakePar2(t, "#!/bin/sh\necho ok\nexit 0\n")
+	s := New(Config{Enabled: true, BinaryPath: bin, WorkDir: t.TempDir()})
+
+	var downloads int64
+	dl := blockingDownloader{
+		downloads: &downloads,
+		started:   make(chan struct{}),
+		release:   make(chan struct{}),
+		startOnce: &sync.Once{},
+		files: map[string]string{
+			"movie.mkv":  strings.Repeat("v", 4000),
+			"movie.par2": "index",
+		},
+	}
+
+	const n = 6
+	type outcome struct {
+		path    string
+		cleanup func()
+		err     error
+	}
+	results := make([]outcome, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			p, c, e := s.DownloadRepairLocateShared(context.Background(), "release-key", dl)
+			results[i] = outcome{path: p, cleanup: c, err: e}
+		}(i)
+	}
+
+	// Wait until the (single) leader is blocked inside the download, then let it
+	// finish. Any caller that arrives while the leader holds the entry coalesces.
+	select {
+	case <-dl.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("download never started")
+	}
+	close(dl.release)
+	wg.Wait()
+
+	if got := atomic.LoadInt64(&downloads); got != 1 {
+		t.Fatalf("downloads = %d, want 1 (concurrent callers must coalesce)", got)
+	}
+
+	want := results[0].path
+	if want == "" {
+		t.Fatal("leader returned empty path")
+	}
+	for i, r := range results {
+		if r.err != nil {
+			t.Fatalf("caller %d err = %v, want nil", i, r.err)
+		}
+		if r.path != want {
+			t.Fatalf("caller %d path = %q, want shared %q", i, r.path, want)
+		}
+		if r.cleanup == nil {
+			t.Fatalf("caller %d cleanup = nil", i)
+		}
+	}
+
+	scratch := filepath.Dir(want)
+	if _, err := os.Stat(scratch); err != nil {
+		t.Fatalf("scratch dir missing before any cleanup: %v", err)
+	}
+	// Releasing all-but-one must keep the shared dir alive for the last reader.
+	for i := 0; i < n-1; i++ {
+		results[i].cleanup()
+	}
+	if _, err := os.Stat(scratch); err != nil {
+		t.Fatalf("scratch dir removed while a caller still holds it: %v", err)
+	}
+	results[n-1].cleanup()
+	if _, err := os.Stat(scratch); !os.IsNotExist(err) {
+		t.Fatalf("scratch dir survived final cleanup: stat err = %v", err)
+	}
+}
+
+// TestDownloadRepairLocateSharedRetriesAfterAllReleased verifies that once every
+// caller of a coalesced repair has released, the key is forgotten so a later
+// request runs a fresh download rather than reusing a removed scratch dir.
+func TestDownloadRepairLocateSharedRetriesAfterAllReleased(t *testing.T) {
+	skipNoShell(t)
+	bin := writeFakePar2(t, "#!/bin/sh\necho ok\nexit 0\n")
+	s := New(Config{Enabled: true, BinaryPath: bin, WorkDir: t.TempDir()})
+
+	var downloads int64
+	mk := func() blockingDownloader {
+		return blockingDownloader{
+			downloads: &downloads,
+			started:   make(chan struct{}),
+			release:   closedChan(),
+			startOnce: &sync.Once{},
+			files:     map[string]string{"movie.mkv": "vvvv", "movie.par2": "index"},
+		}
+	}
+
+	p1, c1, err := s.DownloadRepairLocateShared(context.Background(), "k", mk())
+	if err != nil {
+		t.Fatalf("first repair err = %v", err)
+	}
+	c1()
+	if _, statErr := os.Stat(filepath.Dir(p1)); !os.IsNotExist(statErr) {
+		t.Fatalf("first scratch dir not cleaned: %v", statErr)
+	}
+
+	p2, c2, err := s.DownloadRepairLocateShared(context.Background(), "k", mk())
+	if err != nil {
+		t.Fatalf("second repair err = %v", err)
+	}
+	defer c2()
+	if got := atomic.LoadInt64(&downloads); got != 2 {
+		t.Fatalf("downloads = %d, want 2 (sequential calls must not share a freed result)", got)
+	}
+	if p2 == p1 {
+		t.Fatalf("second repair reused freed scratch path %q", p2)
+	}
+}
+
 // --- test helpers ---
 
 type stubDownloader struct {
 	files map[string]string
 	err   error
+}
+
+// blockingDownloader counts invocations and blocks each Download on release
+// until the test unblocks it, so concurrent coalescing can be observed
+// deterministically. started is closed exactly once, when the first (leader)
+// download begins.
+type blockingDownloader struct {
+	downloads *int64
+	started   chan struct{}
+	release   chan struct{}
+	startOnce *sync.Once
+	files     map[string]string
+}
+
+func (d blockingDownloader) Download(_ context.Context, workDir string) ([]string, error) {
+	atomic.AddInt64(d.downloads, 1)
+	d.startOnce.Do(func() { close(d.started) })
+	<-d.release
+	var names []string
+	for name, content := range d.files {
+		if err := os.WriteFile(filepath.Join(workDir, name), []byte(content), 0o644); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	return names, nil
+}
+
+func closedChan() chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
 }
 
 func (d stubDownloader) Download(_ context.Context, workDir string) ([]string, error) {

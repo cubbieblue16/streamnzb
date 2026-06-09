@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"streamnzb/pkg/core/logger"
+	"streamnzb/pkg/services/par2"
 	"streamnzb/pkg/session"
 )
 
@@ -21,6 +22,29 @@ type sessionFilesetDownloader struct {
 
 func (d sessionFilesetDownloader) Download(ctx context.Context, workDir string) ([]string, error) {
 	return d.mgr.MaterializeFilesetToDir(ctx, d.sess, workDir)
+}
+
+// filesetDownloaderFor returns the par2.Downloader for a session's fileset. The
+// production path materializes from the session manager; tests override via
+// newFilesetDownloader.
+func (s *Server) filesetDownloaderFor(sess *session.Session) par2.Downloader {
+	if s.newFilesetDownloader != nil {
+		return s.newFilesetDownloader(sess)
+	}
+	return sessionFilesetDownloader{mgr: s.sessionManager, sess: sess}
+}
+
+// attemptLastResortRepair runs the PAR2 fallback while the session is still
+// live, then tears the session down regardless of outcome.
+//
+// Ordering is the whole point: DeleteSession closes the session and nils its
+// NZB, so it MUST run AFTER attemptPar2Repair. The previous code deleted first,
+// which guaranteed the repair's NZB load failed every time — the feature was
+// dead code.
+func (s *Server) attemptLastResortRepair(ctx context.Context, sess *session.Session, sessionID string) (io.ReadSeekCloser, string, int64, bool) {
+	stream, name, size, ok := s.attemptPar2Repair(ctx, sess)
+	s.sessionManager.DeleteSession(sessionID)
+	return stream, name, size, ok
 }
 
 // cleanupReadSeekCloser serves a repaired file from disk and removes the repair
@@ -68,8 +92,8 @@ func (s *Server) attemptPar2Repair(ctx context.Context, sess *session.Session) (
 		return nil, "", 0, false
 	}
 
-	dl := sessionFilesetDownloader{mgr: s.sessionManager, sess: sess}
-	path, cleanup, err := s.par2.DownloadRepairLocate(ctx, sessionID, dl)
+	dl := s.filesetDownloaderFor(sess)
+	path, cleanup, err := s.par2.DownloadRepairLocateShared(ctx, sessionID, dl)
 	if err != nil {
 		logger.Info("PAR2 fallback did not recover release", "session", sessionID, "err", err)
 		return nil, "", 0, false

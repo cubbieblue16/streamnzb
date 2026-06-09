@@ -1265,10 +1265,11 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request, streamConfig
 					s.recordedFailureSessionIDs.Delete(id)
 				}(sessionID, sess.Done())
 			}
-			s.sessionManager.DeleteSession(sessionID)
 			if !temporaryLimitErr && streamFailoverEnabled(streamConfig) {
 				if nextSess, nextID, switchErr := s.switchToNextFallback(r.Context(), sess, streamConfig); nextID != "" && switchErr == nil {
 					logger.Info("Playback failover advanced", "from", sessionID, "to", nextID, "err", prepareErr)
+					// Tear down the failed slot now that a replacement exists.
+					s.sessionManager.DeleteSession(sessionID)
 					sess, sessionID = nextSess, nextID
 					continue
 				}
@@ -1277,12 +1278,15 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request, streamConfig
 			// Gated last-resort recovery: when PAR2 repair is enabled (off by
 			// default) and the release carries recovery files, download the full
 			// fileset, repair it with par2, and serve the reconstructed media.
-			// mergedCtx was canceled above, so the repair runs on a fresh
-			// request-scoped context; on success we reassign mergedCtx/mergedCancel
-			// to a live context so the serve path's close/lifecycle wiring below
-			// (which keys off mergedCtx.Done()) doesn't instantly tear down the
-			// repaired stream.
-			if par2Stream, par2Name, par2Size, par2OK := s.attemptPar2Repair(r.Context(), sess); par2OK {
+			// The repair runs against the still-live session (its NZB intact);
+			// attemptLastResortRepair deletes the session only afterward — the
+			// ordering is mandatory, because deleting first nils the NZB and the
+			// repair would always fail. mergedCtx was canceled above, so the
+			// repair runs on a fresh request-scoped context; on success we
+			// reassign mergedCtx/mergedCancel to a live context so the serve
+			// path's close/lifecycle wiring below (which keys off mergedCtx.Done())
+			// doesn't instantly tear down the repaired stream.
+			if par2Stream, par2Name, par2Size, par2OK := s.attemptLastResortRepair(r.Context(), sess, sessionID); par2OK {
 				mergedCtx, mergedCancel = context.WithCancel(r.Context())
 				stream = par2Stream
 				name = par2Name

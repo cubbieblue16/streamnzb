@@ -58,6 +58,10 @@ type Server struct {
 	availIndexerStats         map[string]AvailIndexerStats
 	uniqueIndexerHits         map[string]int64
 	par2                      *par2.Service // last-resort PAR2 repair; nil/disabled = no-op
+	// newFilesetDownloader builds the par2.Downloader used by the PAR2 fallback.
+	// Nil in production (a session-backed Usenet downloader is built on demand);
+	// tests inject a stub so repair can complete without a real transfer.
+	newFilesetDownloader func(*session.Session) par2.Downloader
 }
 
 // AvailIndexerStats stores per-indexer availability outcomes aggregated from
